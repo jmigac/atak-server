@@ -322,10 +322,6 @@ async def _handle_cot_client(
                     _queue_text(state, session, "AUTH FAILED")
                     await asyncio.sleep(0.05)
                     return
-        else:
-            # iTAK/ATAK variants may expect an auth acknowledgment even when
-            # credentials are not required.
-            _queue_text(state, session, "AUTH OK")
 
         while True:
             try:

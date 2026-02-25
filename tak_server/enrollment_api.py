@@ -158,11 +158,12 @@ class EnrollmentApi:
         zip_name: str,
     ) -> bytes:
         truststore = self._truststore_bytes()
+        cot_port = self._settings.cot_ssl_port if use_tls else self._settings.cot_port
         package = build_connection_datapackage_zip(
             ConnectionDataPackageRequest(
                 username=username,
                 server_host=self._host_for_bundle(request),
-                server_port=self._settings.cot_port,
+                server_port=cot_port,
                 cert_enroll_port=self._settings.enroll_port,
                 use_tls=use_tls,
                 mode=mode,

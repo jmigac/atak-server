@@ -486,15 +486,17 @@ class AdminApi:
         if len(segments) == 2 and segments[1] == "connection-bundle" and request.method == "POST":
             self._require_package_write(user)
             payload = self._json_body(request)
+            use_tls = self._as_bool(payload.get("use_tls"), default=True)
+            default_port = 8089 if use_tls else 8087
 
             try:
                 generated = build_connection_datapackage_zip(
                     ConnectionDataPackageRequest(
                         username=str(payload.get("username") or user.username),
                         server_host=str(payload.get("server_host", "")),
-                        server_port=int(payload.get("server_port", 8087)),
+                        server_port=int(payload.get("server_port", default_port)),
                         cert_enroll_port=int(payload.get("cert_enroll_port", 8446)),
-                        use_tls=self._as_bool(payload.get("use_tls"), default=True),
+                        use_tls=use_tls,
                         mode=str(payload.get("mode", "itak")),
                         zip_name=str(
                             payload.get("zip_name")

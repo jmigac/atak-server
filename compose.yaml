@@ -5,11 +5,13 @@ services:
     image: tak-server:dev
     ports:
       - "8087:8087"
+      - "8089:8089"
       - "8088:8088"
       - "8446:8446"
     environment:
       TAK_BIND_HOST: "0.0.0.0"
       TAK_COT_PORT: "8087"
+      TAK_COT_SSL_PORT: "8089"
       TAK_ADMIN_PORT: "8088"
       TAK_IDLE_TIMEOUT_SECONDS: "120"
       TAK_QUEUE_SIZE: "500"

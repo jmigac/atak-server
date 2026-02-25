@@ -209,6 +209,13 @@ def _parse_auth_frame(frame: bytes) -> tuple[str, str] | None:
     return username.strip(), password.strip()
 
 
+def _parse_keepalive_frame(frame: bytes) -> str | None:
+    text = frame.decode("utf-8", errors="ignore").strip().upper()
+    if text in {"PING", "PING_REQUEST", "HEARTBEAT"}:
+        return "PONG"
+    return None
+
+
 def _extract_peer_certificate(
     writer: asyncio.StreamWriter,
 ) -> tuple[str, Optional[str], Optional[str], Optional[str]] | None:
@@ -315,6 +322,10 @@ async def _handle_cot_client(
                     _queue_text(state, session, "AUTH FAILED")
                     await asyncio.sleep(0.05)
                     return
+        else:
+            # iTAK/ATAK variants may expect an auth acknowledgment even when
+            # credentials are not required.
+            _queue_text(state, session, "AUTH OK")
 
         while True:
             try:
@@ -363,6 +374,11 @@ async def _handle_cot_client(
                         if identity is not None:
                             session.identity = identity
                     _queue_text(state, session, "AUTH OK")
+                    continue
+
+                keepalive_response = _parse_keepalive_frame(frame)
+                if keepalive_response is not None:
+                    _queue_text(state, session, keepalive_response)
                     continue
 
                 if settings.require_client_auth and not session.authenticated:
@@ -506,8 +522,18 @@ async def run() -> None:
         lambda r, w: _handle_cot_client(r, w, settings, state, repository),
         host=settings.bind_host,
         port=settings.cot_port,
-        ssl=tls_context,
+        ssl=None,
     )
+    cot_ssl_server = None
+    if settings.tls_enabled:
+        if settings.cot_ssl_port == settings.cot_port:
+            raise ValueError("TAK_COT_SSL_PORT must differ from TAK_COT_PORT")
+        cot_ssl_server = await asyncio.start_server(
+            lambda r, w: _handle_cot_client(r, w, settings, state, repository),
+            host=settings.bind_host,
+            port=settings.cot_ssl_port,
+            ssl=tls_context,
+        )
     admin_server = await asyncio.start_server(
         admin_api.handle_client,
         host=settings.bind_host,
@@ -522,6 +548,9 @@ async def run() -> None:
             ssl=tls_context if settings.tls_enabled else None,
         )
     cot_addresses = ", ".join(str(sock.getsockname()) for sock in cot_server.sockets or [])
+    cot_ssl_addresses = ""
+    if cot_ssl_server is not None:
+        cot_ssl_addresses = ", ".join(str(sock.getsockname()) for sock in cot_ssl_server.sockets or [])
     admin_addresses = ", ".join(str(sock.getsockname()) for sock in admin_server.sockets or [])
     enroll_addresses = ""
     if enrollment_server is not None:
@@ -529,7 +558,9 @@ async def run() -> None:
             str(sock.getsockname()) for sock in enrollment_server.sockets or []
         )
 
-    LOGGER.info("CoT server listening on %s tls=%s", cot_addresses, bool(tls_context))
+    LOGGER.info("CoT TCP server listening on %s tls=%s", cot_addresses, False)
+    if cot_ssl_server is not None:
+        LOGGER.info("CoT TLS server listening on %s tls=%s", cot_ssl_addresses, True)
     LOGGER.info("Admin server listening on %s", admin_addresses)
     if enrollment_server is not None:
         LOGGER.info(
@@ -539,13 +570,17 @@ async def run() -> None:
         )
 
     try:
-        if enrollment_server is None:
-            async with cot_server, admin_server:
-                await stop_event.wait()
-                LOGGER.info("shutdown signal received")
-        else:
-            async with cot_server, admin_server, enrollment_server:
-                await stop_event.wait()
-                LOGGER.info("shutdown signal received")
+        servers = [cot_server]
+        if cot_ssl_server is not None:
+            servers.append(cot_ssl_server)
+        servers.append(admin_server)
+        if enrollment_server is not None:
+            servers.append(enrollment_server)
+
+        async with contextlib.AsyncExitStack() as stack:
+            for server in servers:
+                await stack.enter_async_context(server)
+            await stop_event.wait()
+            LOGGER.info("shutdown signal received")
     finally:
         repository.close()

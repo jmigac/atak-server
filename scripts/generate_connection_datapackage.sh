@@ -85,6 +85,7 @@ fetch_server_cert_pem() {
 
 SERVER_HOST="server.migac.local"
 SERVER_PORT="8087"
+SERVER_PORT_EXPLICIT="false"
 ENROLL_PORT="8446"
 MODE="itak"
 PROFILE_USERNAME="operator"
@@ -108,7 +109,7 @@ CLIENT_PASSWORD="atakatak"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --server-host) SERVER_HOST="${2:-}"; shift 2 ;;
-    --server-port) SERVER_PORT="${2:-}"; shift 2 ;;
+    --server-port) SERVER_PORT="${2:-}"; SERVER_PORT_EXPLICIT="true"; shift 2 ;;
     --enroll-port) ENROLL_PORT="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     --profile-username) PROFILE_USERNAME="${2:-}"; shift 2 ;;
@@ -167,6 +168,10 @@ fi
 if [[ "$MODE" != "itak" && "$MODE" != "atak" ]]; then
   echo "--mode must be itak or atak" >&2
   exit 1
+fi
+
+if [[ "$USE_TLS" == "true" && "$SERVER_PORT_EXPLICIT" != "true" ]]; then
+  SERVER_PORT="8089"
 fi
 
 require_cmd curl

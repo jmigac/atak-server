@@ -102,25 +102,31 @@ class FrameParser:
         return frames
 
     def _parse_unknown(self) -> DecodedFrame | None:
-        if self._buffer.startswith(b"<"):
+        if self._looks_textual():
+            xml_frame = self._try_parse_xml_event_frame()
+            if xml_frame is not None:
+                frame, consume = xml_frame
+                self._wire_format = WIRE_DELIMITED
+                self._buffer = self._buffer[consume:]
+                return frame
+
             delimited = self._try_parse_delimited_frame()
-            if delimited is None:
-                return None
-            self._wire_format = WIRE_DELIMITED
-            self._consume_delimited()
-            return delimited
+            if delimited is not None:
+                self._wire_format = WIRE_DELIMITED
+                self._consume_delimited()
+                return delimited
+
+            control = self._try_parse_control_frame_without_delimiter()
+            if control is not None:
+                self._wire_format = WIRE_DELIMITED
+                self._buffer = b""
+                return control
 
         varint = self._try_parse_varint_frame()
         if varint is not None:
             self._wire_format = WIRE_VARINT
             self._consume_varint()
             return varint
-
-        delimited = self._try_parse_delimited_frame()
-        if delimited is not None:
-            self._wire_format = WIRE_DELIMITED
-            self._consume_delimited()
-            return delimited
 
         return None
 
@@ -149,6 +155,55 @@ class FrameParser:
         split_at = min(indexes)
         payload = self._buffer[:split_at].strip()
         return DecodedFrame(payload=payload, wire_format=WIRE_DELIMITED)
+
+    def _looks_textual(self) -> bool:
+        sample = self._buffer[:64]
+        if not sample:
+            return False
+        for byte in sample:
+            if byte in (0x09, 0x0A, 0x0D):
+                continue
+            if 0x20 <= byte <= 0x7E:
+                continue
+            return False
+        return True
+
+    def _try_parse_xml_event_frame(self) -> tuple[DecodedFrame, int] | None:
+        if not self._buffer:
+            return None
+        leading = len(self._buffer) - len(self._buffer.lstrip())
+        candidate = self._buffer[leading:]
+        start = candidate.find(b"<event")
+        if start < 0:
+            return None
+        end = candidate.find(b"</event>", start)
+        if end < 0:
+            return None
+        end_index = end + len(b"</event>")
+        payload = candidate[start:end_index]
+        consume = leading + end_index
+        while consume < len(self._buffer) and self._buffer[consume : consume + 1] in {
+            b"\n",
+            b"\r",
+            b"\x00",
+        }:
+            consume += 1
+        return DecodedFrame(payload=payload, wire_format=WIRE_DELIMITED), consume
+
+    def _try_parse_control_frame_without_delimiter(self) -> DecodedFrame | None:
+        if not self._buffer or len(self._buffer) > 512:
+            return None
+        text = self._buffer.decode("utf-8", errors="ignore").strip()
+        if not text:
+            return None
+        upper = text.upper()
+        if upper.startswith("AUTH") or upper.startswith("AUTH_TOKEN") or upper in {
+            "PING",
+            "PING_REQUEST",
+            "HEARTBEAT",
+        }:
+            return DecodedFrame(payload=text.encode("utf-8"), wire_format=WIRE_DELIMITED)
+        return None
 
     def _consume_delimited(self) -> None:
         indexes = []

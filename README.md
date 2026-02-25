@@ -19,6 +19,7 @@ docker compose up --build
 
 Ports:
 - CoT TCP: `8087`
+- CoT TLS: `8089`
 - Admin API HTTP: `8088`
 - Enrollment API: `8446`
 
@@ -28,7 +29,7 @@ Bootstrap admin (from `compose.yaml` defaults):
 
 ## CoT client authentication
 
-After connecting to TCP `8087`, authenticate before sending CoT:
+After connecting to TCP `8087` (or TLS `8089`), authenticate before sending CoT:
 
 ```text
 AUTH admin admin12345
@@ -69,7 +70,7 @@ and mount `/etc/letsencrypt` read-only into the container.
 4. In iTAK server connection, use:
 - Protocol: `TCP` (SSL/TLS enabled in the profile)
 - Host: your server DNS/IP
-- Port: `8087`
+- Port: `8089`
 - Certificate auth enabled in iTAK profile
 
 TAK Aware and OmniTAK commonly require enrollment endpoint availability on `8446`.
@@ -202,7 +203,7 @@ Generate iTAK connection bundle ZIP for direct download (TLS):
 CA_B64=$(base64 < certs/truststore-YOUR-CA.p12 | tr -d '\n')
 curl -u admin:admin12345 \
   -H "Content-Type: application/json" \
-  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"truststore_p12_base64\":\"$CA_B64\"}" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8089,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"truststore_p12_base64\":\"$CA_B64\"}" \
   http://localhost:8088/packages/connection-bundle \
   -o tak-itak-connection.zip
 ```
@@ -214,7 +215,7 @@ Generate iTAK connection bundle for Let's Encrypt/public CA (no truststore uploa
 ```bash
 curl -u admin:admin12345 \
   -H "Content-Type: application/json" \
-  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"cert_enroll_port\":8446,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"use_tls\":true,\"lets_encrypt\":true}" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8089,\"cert_enroll_port\":8446,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"use_tls\":true,\"lets_encrypt\":true}" \
   http://localhost:8088/packages/connection-bundle \
   -o tak-itak-connection.zip
 ```
@@ -225,7 +226,7 @@ Generate and store bundle as managed server package:
 CA_B64=$(base64 < certs/truststore-YOUR-CA.p12 | tr -d '\n')
 curl -u admin:admin12345 \
   -H "Content-Type: application/json" \
-  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"mode\":\"itak\",\"name\":\"itak-server-connection\",\"store\":true,\"truststore_p12_base64\":\"$CA_B64\"}" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8089,\"mode\":\"itak\",\"name\":\"itak-server-connection\",\"store\":true,\"truststore_p12_base64\":\"$CA_B64\"}" \
   http://localhost:8088/packages/connection-bundle
 ```
 
@@ -234,7 +235,7 @@ Local Bash generator (calls API endpoint and writes ZIP):
 ```bash
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
-  --server-port 8087 \
+  --server-port 8089 \
   --enroll-port 8446 \
   --mode itak \
   --tls \
@@ -247,7 +248,7 @@ Create truststore automatically from remote TLS server cert:
 ```bash
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
-  --server-port 8087 \
+  --server-port 8089 \
   --enroll-port 8446 \
   --mode itak \
   --tls \
@@ -272,7 +273,7 @@ Let's Encrypt/public CA bundle (TLS, no truststore generation):
 ```bash
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
-  --server-port 8087 \
+  --server-port 8089 \
   --enroll-port 8446 \
   --mode itak \
   --lets-encrypt \
@@ -283,6 +284,7 @@ scripts/generate_connection_datapackage.sh \
 
 - `TAK_BIND_HOST` (default `0.0.0.0`)
 - `TAK_COT_PORT` (default `8087`)
+- `TAK_COT_SSL_PORT` (default `8089`)
 - `TAK_ADMIN_PORT` (default `8088`)
 - `TAK_IDLE_TIMEOUT_SECONDS` (default `120`)
 - `TAK_QUEUE_SIZE` (default `500`)
@@ -292,7 +294,7 @@ scripts/generate_connection_datapackage.sh \
 - `TAK_PUBLIC_HOST` (optional public hostname used by enrollment profiles)
 - `TAK_BOOTSTRAP_ADMIN_USERNAME` (default `admin`)
 - `TAK_BOOTSTRAP_ADMIN_PASSWORD` (default `admin12345`)
-- `TAK_REQUIRE_CLIENT_AUTH` (default `true`)
+- `TAK_REQUIRE_CLIENT_AUTH` (default `false`)
 - `TAK_ALLOW_PASSWORD_AUTH` (default `true`)
 - `TAK_CERT_AUTH_ENABLED` (default `false`)
 - `TAK_CERT_AUTO_PROVISION` (default `true`)

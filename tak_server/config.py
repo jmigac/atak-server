@@ -24,6 +24,7 @@ def _read_int(key: str, default: int) -> int:
 class Settings:
     bind_host: str
     cot_port: int
+    cot_ssl_port: int
     admin_port: int
     idle_timeout_seconds: int
     queue_size: int
@@ -56,6 +57,7 @@ def load_settings() -> Settings:
     return Settings(
         bind_host=os.getenv("TAK_BIND_HOST", "0.0.0.0"),
         cot_port=_read_int("TAK_COT_PORT", 8087),
+        cot_ssl_port=_read_int("TAK_COT_SSL_PORT", 8089),
         admin_port=_read_int("TAK_ADMIN_PORT", 8088),
         idle_timeout_seconds=_read_int("TAK_IDLE_TIMEOUT_SECONDS", 120),
         queue_size=_read_int("TAK_QUEUE_SIZE", 500),

@@ -5,9 +5,7 @@ services:
     image: tak-server:dev
     ports:
       - "8087:8087"
-      - "8089:8089"
       - "8088:8088"
-      - "8446:8446"
     environment:
       TAK_BIND_HOST: "0.0.0.0"
       TAK_COT_PORT: "8087"
@@ -23,8 +21,8 @@ services:
       TAK_BOOTSTRAP_ADMIN_PASSWORD: "admin12345"
       TAK_REQUIRE_CLIENT_AUTH: "false"
       TAK_ALLOW_PASSWORD_AUTH: "true"
-      TAK_CERT_AUTH_ENABLED: "true"
-      TAK_CERT_AUTO_PROVISION: "true"
+      TAK_CERT_AUTH_ENABLED: "false"
+      TAK_CERT_AUTO_PROVISION: "false"
       TAK_TLS_ENABLED: "false"
       TAK_TLS_REQUIRE_CLIENT_CERT: "false"
       TAK_TLS_CA_FILE: "/app/certs/ca.crt"
@@ -33,14 +31,12 @@ services:
       TAK_TLS_LETSENCRYPT_DOMAIN: ""
       TAK_TLS_LETSENCRYPT_DIR: "/etc/letsencrypt/live"
       TAK_PUBLIC_HOST: ""
-      TAK_ENROLL_ENABLED: "true"
+      TAK_ENROLL_ENABLED: "false"
       TAK_ENROLL_PORT: "8446"
       TAK_ENROLL_TRUSTSTORE_P12_FILE: "/app/certs/truststore-YOUR-CA.p12"
       TAK_ENROLL_LETSENCRYPT: "false"
     volumes:
       - tak-server-data:/app/data
-      - ./certs:/app/certs:ro
-      - ./letsencrypt:/etc/letsencrypt:ro
 
 volumes:
   tak-server-data:

@@ -244,13 +244,13 @@ cat >"$PAYLOAD_FILE" <<EOF
 EOF
 
 mkdir -p "$(dirname "$OUTPUT")"
-#curl --fail-with-body -sS \
-#  -u "$ADMIN_USER:$ADMIN_PASS" \
-#  -H "Content-Type: application/json" \
-#  -X POST \
-#  --data @"$PAYLOAD_FILE" \
-#  "$API_URL/packages/connection-bundle" \
-#  -o "$OUTPUT"
+curl --fail-with-body -sS \
+  -u "$ADMIN_USER:$ADMIN_PASS" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  --data @"$PAYLOAD_FILE" \
+  "$API_URL/packages/connection-bundle" \
+  -o "$OUTPUT"
 
 echo "Generated connection package: $OUTPUT"
 echo "Transport mode: $([[ "$USE_TLS" == "true" ]] && echo "TLS" || echo "TCP (non-secure)")"

@@ -13,6 +13,7 @@ from tak_server.datapackage_builder import (
     ConnectionDataPackageRequest,
     build_connection_datapackage_zip,
 )
+from tak_server.qr_utils import render_qr_png
 from tak_server.repository import Repository, UserIdentity
 
 
@@ -125,6 +126,18 @@ class EnrollmentApi:
         host = host_header.split(":", maxsplit=1)[0].strip()
         return host or "localhost"
 
+    def _base_url(self, request: EnrollRequest) -> str:
+        host = self._host_for_bundle(request)
+        if self._settings.public_host:
+            scheme = "https" if self._settings.tls_enabled else "http"
+            return f"{scheme}://{host}:{self._settings.enroll_port}"
+        proto = request.headers.get("x-forwarded-proto")
+        if proto:
+            scheme = proto.split(",", maxsplit=1)[0].strip().lower()
+        else:
+            scheme = "https" if self._settings.tls_enabled else "http"
+        return f"{scheme}://{host}:{self._settings.enroll_port}"
+
     def _truststore_bytes(self) -> bytes | None:
         path = self._settings.enroll_truststore_p12_file
         if not path:
@@ -134,9 +147,128 @@ class EnrollmentApi:
             return None
         return file_path.read_bytes()
 
+    def _build_connection_package(
+        self,
+        *,
+        request: EnrollRequest,
+        username: str,
+        mode: str,
+        use_tls: bool,
+        lets_encrypt: bool,
+        zip_name: str,
+    ) -> bytes:
+        truststore = self._truststore_bytes()
+        package = build_connection_datapackage_zip(
+            ConnectionDataPackageRequest(
+                username=username,
+                server_host=self._host_for_bundle(request),
+                server_port=self._settings.cot_port,
+                cert_enroll_port=self._settings.enroll_port,
+                use_tls=use_tls,
+                mode=mode,
+                zip_name=zip_name,
+                lets_encrypt=lets_encrypt,
+                truststore_p12_base64=(
+                    base64.b64encode(truststore).decode("ascii") if truststore else None
+                ),
+            )
+        )
+        return package.content
+
     async def _dispatch(self, request: EnrollRequest, writer: asyncio.StreamWriter) -> None:
         if request.path == "/health" and request.method == "GET":
             await self._write_json(writer, 200, {"status": "ok"})
+            return
+
+        if request.path == "/join/package.zip" and request.method == "GET":
+            mode = request.query.get("mode", ["itak"])[0].lower().strip()
+            if mode not in {"itak", "atak"}:
+                mode = "itak"
+            use_tls = _to_bool(request.query.get("tls", [None])[0], default=self._settings.tls_enabled)
+            lets_encrypt = _to_bool(
+                request.query.get("lets_encrypt", [None])[0],
+                default=self._settings.enroll_letsencrypt or (use_tls and not bool(self._truststore_bytes())),
+            )
+            username = request.query.get("username", ["operator"])[0]
+            zip_name = request.query.get("name", [f"{username}-join"])[0]
+            content = self._build_connection_package(
+                request=request,
+                username=username,
+                mode=mode,
+                use_tls=use_tls,
+                lets_encrypt=lets_encrypt,
+                zip_name=zip_name,
+            )
+            await self._write_bytes(
+                writer,
+                200,
+                content,
+                content_type="application/zip",
+                extra_headers={
+                    "Content-Disposition": f'attachment; filename="{zip_name}.zip"'
+                },
+            )
+            return
+
+        if request.path == "/join/qr.png" and request.method == "GET":
+            mode = request.query.get("mode", ["itak"])[0].lower().strip()
+            if mode not in {"itak", "atak"}:
+                mode = "itak"
+            tls_text = request.query.get("tls", ["true" if self._settings.tls_enabled else "false"])[0]
+            lets_encrypt_text = request.query.get(
+                "lets_encrypt",
+                ["true" if self._settings.enroll_letsencrypt else "false"],
+            )[0]
+            username = request.query.get("username", ["operator"])[0]
+            join_url = (
+                f"{self._base_url(request)}/join/package.zip"
+                f"?mode={mode}&tls={tls_text}&lets_encrypt={lets_encrypt_text}&username={username}"
+            )
+            png = render_qr_png(join_url)
+            await self._write_bytes(writer, 200, png, content_type="image/png")
+            return
+
+        if request.path == "/join" and request.method == "GET":
+            mode = request.query.get("mode", ["itak"])[0].lower().strip()
+            if mode not in {"itak", "atak"}:
+                mode = "itak"
+            tls_text = request.query.get("tls", ["true" if self._settings.tls_enabled else "false"])[0]
+            lets_encrypt_text = request.query.get(
+                "lets_encrypt",
+                ["true" if self._settings.enroll_letsencrypt else "false"],
+            )[0]
+            username = request.query.get("username", ["operator"])[0]
+            qr_src = (
+                f"/join/qr.png?mode={mode}&tls={tls_text}"
+                f"&lets_encrypt={lets_encrypt_text}&username={username}"
+            )
+            package_link = (
+                f"/join/package.zip?mode={mode}&tls={tls_text}"
+                f"&lets_encrypt={lets_encrypt_text}&username={username}"
+            )
+            html = f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>TAK Join QR</title>
+    <style>
+      body {{ font-family: Arial, sans-serif; margin: 24px; }}
+      .box {{ max-width: 560px; border: 1px solid #ddd; padding: 16px; border-radius: 8px; }}
+      img {{ width: 320px; height: 320px; border: 1px solid #ddd; }}
+      code {{ background: #f5f5f5; padding: 2px 6px; }}
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h2>TAK Join QR</h2>
+      <p>Scan this QR in TAK Aware / OmniTAK / iTAK to download a join package.</p>
+      <p>Mode: <code>{mode}</code>, TLS: <code>{tls_text}</code>, Enroll Port: <code>{self._settings.enroll_port}</code></p>
+      <p><img src="{qr_src}" alt="Join QR" /></p>
+      <p>Direct package URL: <a href="{package_link}">{package_link}</a></p>
+    </div>
+  </body>
+</html>"""
+            await self._write_bytes(writer, 200, html.encode("utf-8"), content_type="text/html; charset=utf-8")
             return
 
         if request.path in {"/oauth/token", "/Marti/oauth/token"} and request.method in {"POST", "GET"}:
@@ -180,7 +312,6 @@ class EnrollmentApi:
                 await self._write_json(writer, 401, {"error": "authentication required"})
                 return
 
-            truststore = self._truststore_bytes()
             user_agent = request.headers.get("user-agent", "").lower()
             mode = request.query.get("mode", [""])[0].lower().strip()
             if mode not in {"itak", "atak"}:
@@ -189,31 +320,24 @@ class EnrollmentApi:
             use_tls = _to_bool(request.query.get("tls", [None])[0], default=self._settings.tls_enabled)
             lets_encrypt = _to_bool(
                 request.query.get("lets_encrypt", [None])[0],
-                default=self._settings.enroll_letsencrypt or (use_tls and not bool(truststore)),
+                default=self._settings.enroll_letsencrypt or (use_tls and not bool(self._truststore_bytes())),
             )
 
-            package = build_connection_datapackage_zip(
-                ConnectionDataPackageRequest(
-                    username=user.username,
-                    server_host=self._host_for_bundle(request),
-                    server_port=self._settings.cot_port,
-                    cert_enroll_port=self._settings.enroll_port,
-                    use_tls=use_tls,
-                    mode=mode,
-                    zip_name=f"{user.username}-connection",
-                    lets_encrypt=lets_encrypt,
-                    truststore_p12_base64=(
-                        base64.b64encode(truststore).decode("ascii") if truststore else None
-                    ),
-                )
+            package = self._build_connection_package(
+                request=request,
+                username=user.username,
+                mode=mode,
+                use_tls=use_tls,
+                lets_encrypt=lets_encrypt,
+                zip_name=f"{user.username}-connection",
             )
             await self._write_bytes(
                 writer,
                 200,
-                package.content,
+                package,
                 content_type="application/zip",
                 extra_headers={
-                    "Content-Disposition": f'attachment; filename="{package.file_name}"'
+                    "Content-Disposition": f'attachment; filename="{user.username}-connection.zip"'
                 },
             )
             return

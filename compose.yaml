@@ -4,7 +4,7 @@ services:
       context: .
     image: tak-server:dev
     ports:
-      - "8087:8087"
+      - "18087:8087"
       - "8088:8088"
       - "19023:19023"
     environment:

@@ -647,6 +647,20 @@ async def run() -> None:
         host=settings.bind_host,
         port=settings.admin_port,
     )
+    api_compat_server = None
+    if settings.api_compat_enabled:
+        if settings.api_compat_port == settings.admin_port:
+            LOGGER.warning(
+                "API compatibility listener disabled because TAK_API_COMPAT_PORT equals TAK_ADMIN_PORT (%d)",
+                settings.admin_port,
+            )
+        else:
+            api_compat_server = await asyncio.start_server(
+                admin_api.handle_client,
+                host=settings.bind_host,
+                port=settings.api_compat_port,
+                ssl=tls_context if settings.tls_enabled else None,
+            )
     enrollment_server = None
     if settings.enroll_enabled:
         enrollment_server = await asyncio.start_server(
@@ -660,6 +674,11 @@ async def run() -> None:
     if cot_ssl_server is not None:
         cot_ssl_addresses = ", ".join(str(sock.getsockname()) for sock in cot_ssl_server.sockets or [])
     admin_addresses = ", ".join(str(sock.getsockname()) for sock in admin_server.sockets or [])
+    api_compat_addresses = ""
+    if api_compat_server is not None:
+        api_compat_addresses = ", ".join(
+            str(sock.getsockname()) for sock in api_compat_server.sockets or []
+        )
     enroll_addresses = ""
     if enrollment_server is not None:
         enroll_addresses = ", ".join(
@@ -670,6 +689,12 @@ async def run() -> None:
     if cot_ssl_server is not None:
         LOGGER.info("CoT TLS server listening on %s tls=%s", cot_ssl_addresses, True)
     LOGGER.info("Admin server listening on %s", admin_addresses)
+    if api_compat_server is not None:
+        LOGGER.info(
+            "API compatibility server listening on %s tls=%s",
+            api_compat_addresses,
+            settings.tls_enabled,
+        )
     if enrollment_server is not None:
         LOGGER.info(
             "Enrollment server listening on %s tls=%s",
@@ -682,6 +707,8 @@ async def run() -> None:
         if cot_ssl_server is not None:
             servers.append(cot_ssl_server)
         servers.append(admin_server)
+        if api_compat_server is not None:
+            servers.append(api_compat_server)
         if enrollment_server is not None:
             servers.append(enrollment_server)
 

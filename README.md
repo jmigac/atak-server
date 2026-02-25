@@ -21,6 +21,7 @@ Ports:
 - CoT TCP: `8087`
 - CoT TLS: `8089`
 - Admin API HTTP: `8088`
+- API compatibility (FreeTAK-style): `19023`
 - Enrollment API: `8446`
 
 Bootstrap admin (from `compose.yaml` defaults):
@@ -286,6 +287,8 @@ scripts/generate_connection_datapackage.sh \
 - `TAK_COT_PORT` (default `8087`)
 - `TAK_COT_SSL_PORT` (default `8089`)
 - `TAK_ADMIN_PORT` (default `8088`)
+- `TAK_API_COMPAT_ENABLED` (default `true`)
+- `TAK_API_COMPAT_PORT` (default `19023`)
 - `TAK_LOG_LEVEL` (default `INFO`; set `DEBUG` for extra diagnostics)
 - `TAK_IDLE_TIMEOUT_SECONDS` (default `120`)
 - `TAK_QUEUE_SIZE` (default `500`)

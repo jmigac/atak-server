@@ -97,8 +97,23 @@ class AdminApi:
 
     async def _read_request(self, reader: asyncio.StreamReader) -> Optional[HttpRequest]:
         try:
-            raw_headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
-        except Exception:
+            first = await asyncio.wait_for(reader.readexactly(1), timeout=10)
+        except Exception as exc:
+            LOGGER.info("admin header read failed stage=first-byte error=%r", exc)
+            return None
+
+        if first and first[0] == 0x16:
+            LOGGER.info("admin received TLS handshake on plain HTTP listener")
+            return None
+
+        try:
+            raw_headers = first + await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
+        except Exception as exc:
+            LOGGER.info(
+                "admin header read failed stage=headers first_byte=0x%02x error=%r",
+                first[0] if first else -1,
+                exc,
+            )
             return None
 
         lines = raw_headers.decode("utf-8", errors="ignore").split("\r\n")

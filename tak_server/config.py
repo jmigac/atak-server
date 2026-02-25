@@ -26,6 +26,8 @@ class Settings:
     cot_port: int
     cot_ssl_port: int
     admin_port: int
+    api_compat_enabled: bool
+    api_compat_port: int
     idle_timeout_seconds: int
     queue_size: int
     db_path: str
@@ -59,6 +61,8 @@ def load_settings() -> Settings:
         cot_port=_read_int("TAK_COT_PORT", 8087),
         cot_ssl_port=_read_int("TAK_COT_SSL_PORT", 8089),
         admin_port=_read_int("TAK_ADMIN_PORT", 8088),
+        api_compat_enabled=_read_bool("TAK_API_COMPAT_ENABLED", True),
+        api_compat_port=_read_int("TAK_API_COMPAT_PORT", 19023),
         idle_timeout_seconds=_read_int("TAK_IDLE_TIMEOUT_SECONDS", 120),
         queue_size=_read_int("TAK_QUEUE_SIZE", 500),
         db_path=os.getenv("TAK_DB_PATH", "/app/data/tak_server.db"),

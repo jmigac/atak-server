@@ -6,11 +6,14 @@ services:
     ports:
       - "8087:8087"
       - "8088:8088"
+      - "19023:19023"
     environment:
       TAK_BIND_HOST: "0.0.0.0"
       TAK_COT_PORT: "8087"
       TAK_COT_SSL_PORT: "8089"
       TAK_ADMIN_PORT: "8088"
+      TAK_API_COMPAT_ENABLED: "true"
+      TAK_API_COMPAT_PORT: "19023"
       TAK_LOG_LEVEL: "INFO"
       TAK_IDLE_TIMEOUT_SECONDS: "120"
       TAK_QUEUE_SIZE: "500"

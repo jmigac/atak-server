@@ -4,8 +4,8 @@ services:
       context: .
     image: tak-server:dev
     ports:
-      - "18087:8087"
-      - "18088:8088"
+      - "8087:8087"
+      - "8088:8088"
     environment:
       TAK_BIND_HOST: "0.0.0.0"
       TAK_COT_PORT: "8087"

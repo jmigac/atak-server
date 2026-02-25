@@ -20,6 +20,7 @@ docker compose up --build
 Ports:
 - CoT TCP: `8087`
 - Admin API HTTP: `8088`
+- Enrollment API: `8446`
 
 Bootstrap admin (from `compose.yaml` defaults):
 - username: `admin`
@@ -53,6 +54,16 @@ TAK_CERT_AUTO_PROVISION: "true"
 TAK_ALLOW_PASSWORD_AUTH: "false"
 ```
 
+For Let's Encrypt-managed certs you can use:
+
+```yaml
+TAK_TLS_ENABLED: "true"
+TAK_TLS_LETSENCRYPT_DOMAIN: "tak.example.com"
+TAK_TLS_LETSENCRYPT_DIR: "/etc/letsencrypt/live"
+```
+
+and mount `/etc/letsencrypt` read-only into the container.
+
 2. Mount cert files into `/app/certs`.
 3. Install the client certificate (issued by your CA) in iTAK.
 4. In iTAK server connection, use:
@@ -60,6 +71,13 @@ TAK_ALLOW_PASSWORD_AUTH: "false"
 - Host: your server DNS/IP
 - Port: `8087`
 - Certificate auth enabled in iTAK profile
+
+TAK Aware and OmniTAK commonly require enrollment endpoint availability on `8446`.
+This server now exposes enrollment-compatible paths on that port:
+- `GET /Marti/api/tls/profile/enrollment`
+- `GET /api/connection`
+- `GET /api/truststore`
+- `POST/GET /oauth/token`
 
 ## Non-secure TCP mode
 
@@ -189,6 +207,18 @@ curl -u admin:admin12345 \
   -o tak-itak-connection.zip
 ```
 
+Use plain host/IP for `server_host` (no path). If you pass `https://host/path`, the server normalizes it to host.
+
+Generate iTAK connection bundle for Let's Encrypt/public CA (no truststore upload):
+
+```bash
+curl -u admin:admin12345 \
+  -H "Content-Type: application/json" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"cert_enroll_port\":8446,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"use_tls\":true,\"lets_encrypt\":true}" \
+  http://localhost:8088/packages/connection-bundle \
+  -o tak-itak-connection.zip
+```
+
 Generate and store bundle as managed server package:
 
 ```bash
@@ -205,6 +235,7 @@ Local Bash generator (calls API endpoint and writes ZIP):
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
   --server-port 8087 \
+  --enroll-port 8446 \
   --mode itak \
   --tls \
   --ca-cert certs/ca.crt \
@@ -217,6 +248,7 @@ Create truststore automatically from remote TLS server cert:
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
   --server-port 8087 \
+  --enroll-port 8446 \
   --mode itak \
   --tls \
   --fetch-server-cert \
@@ -229,9 +261,22 @@ Non-secure TCP bundle (no truststore needed):
 scripts/generate_connection_datapackage.sh \
   --server-host tak.example.com \
   --server-port 8087 \
+  --enroll-port 8446 \
   --mode itak \
   --tcp \
   --output ./tak-itak-connection-tcp.zip
+```
+
+Let's Encrypt/public CA bundle (TLS, no truststore generation):
+
+```bash
+scripts/generate_connection_datapackage.sh \
+  --server-host tak.example.com \
+  --server-port 8087 \
+  --enroll-port 8446 \
+  --mode itak \
+  --lets-encrypt \
+  --output ./tak-itak-connection-le.zip
 ```
 
 ## Environment variables
@@ -244,6 +289,7 @@ scripts/generate_connection_datapackage.sh \
 - `TAK_DB_PATH` (default `/app/data/tak_server.db`)
 - `TAK_DATA_DIR` (default `/app/data`)
 - `TAK_DEFAULT_GROUP_NAME` (default `default`)
+- `TAK_PUBLIC_HOST` (optional public hostname used by enrollment profiles)
 - `TAK_BOOTSTRAP_ADMIN_USERNAME` (default `admin`)
 - `TAK_BOOTSTRAP_ADMIN_PASSWORD` (default `admin12345`)
 - `TAK_REQUIRE_CLIENT_AUTH` (default `true`)
@@ -257,6 +303,12 @@ scripts/generate_connection_datapackage.sh \
 - `TAK_TLS_CA_PATH` (optional trust store path)
 - `TAK_TLS_CERT_FILE` (required when TLS enabled)
 - `TAK_TLS_KEY_FILE` (required when TLS enabled)
+- `TAK_TLS_LETSENCRYPT_DOMAIN` (optional LE domain to auto-load `/etc/letsencrypt/live/<domain>/fullchain.pem` + `privkey.pem`)
+- `TAK_TLS_LETSENCRYPT_DIR` (default `/etc/letsencrypt/live`)
+- `TAK_ENROLL_ENABLED` (default `true`)
+- `TAK_ENROLL_PORT` (default `8446`)
+- `TAK_ENROLL_TRUSTSTORE_P12_FILE` (optional path used by `/api/truststore`)
+- `TAK_ENROLL_LETSENCRYPT` (default `false`; when true enrollment profiles default to public-CA mode)
 
 ## Build single-arch image
 

@@ -493,6 +493,7 @@ class AdminApi:
                         username=str(payload.get("username") or user.username),
                         server_host=str(payload.get("server_host", "")),
                         server_port=int(payload.get("server_port", 8087)),
+                        cert_enroll_port=int(payload.get("cert_enroll_port", 8446)),
                         use_tls=self._as_bool(payload.get("use_tls"), default=True),
                         mode=str(payload.get("mode", "itak")),
                         zip_name=str(
@@ -504,6 +505,7 @@ class AdminApi:
                             payload.get("truststore_filename", "truststore-YOUR-CA.p12")
                         ),
                         truststore_p12_base64=payload.get("truststore_p12_base64"),
+                        lets_encrypt=self._as_bool(payload.get("lets_encrypt"), default=False),
                         client_cert_filename=payload.get("client_cert_filename"),
                         client_cert_p12_base64=payload.get("client_cert_p12_base64"),
                         ca_password=str(payload.get("ca_password", "atakatak")),

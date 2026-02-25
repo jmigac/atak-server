@@ -13,6 +13,7 @@ from typing import Dict, Optional
 from tak_server.admin_api import AdminApi
 from tak_server.config import Settings, build_tls_context, load_settings
 from tak_server.cot import CoTValidationError, CoTEvent, parse_cot_event
+from tak_server.enrollment_api import EnrollmentApi
 from tak_server.protocol import (
     FrameParser,
     WIRE_DELIMITED,
@@ -473,6 +474,7 @@ async def run() -> None:
         metrics_provider=state.snapshot,
         clients_provider=state.clients_snapshot,
     )
+    enrollment_api = EnrollmentApi(settings=settings, repository=repository)
     tls_context = build_tls_context(settings)
     stop_event = asyncio.Event()
 
@@ -494,15 +496,39 @@ async def run() -> None:
         host=settings.bind_host,
         port=settings.admin_port,
     )
+    enrollment_server = None
+    if settings.enroll_enabled:
+        enrollment_server = await asyncio.start_server(
+            enrollment_api.handle_client,
+            host=settings.bind_host,
+            port=settings.enroll_port,
+            ssl=tls_context if settings.tls_enabled else None,
+        )
     cot_addresses = ", ".join(str(sock.getsockname()) for sock in cot_server.sockets or [])
     admin_addresses = ", ".join(str(sock.getsockname()) for sock in admin_server.sockets or [])
+    enroll_addresses = ""
+    if enrollment_server is not None:
+        enroll_addresses = ", ".join(
+            str(sock.getsockname()) for sock in enrollment_server.sockets or []
+        )
 
     LOGGER.info("CoT server listening on %s tls=%s", cot_addresses, bool(tls_context))
     LOGGER.info("Admin server listening on %s", admin_addresses)
+    if enrollment_server is not None:
+        LOGGER.info(
+            "Enrollment server listening on %s tls=%s",
+            enroll_addresses,
+            settings.tls_enabled,
+        )
 
     try:
-        async with cot_server, admin_server:
-            await stop_event.wait()
-            LOGGER.info("shutdown signal received")
+        if enrollment_server is None:
+            async with cot_server, admin_server:
+                await stop_event.wait()
+                LOGGER.info("shutdown signal received")
+        else:
+            async with cot_server, admin_server, enrollment_server:
+                await stop_event.wait()
+                LOGGER.info("shutdown signal received")
     finally:
         repository.close()

@@ -5,6 +5,7 @@ import io
 import uuid
 import zipfile
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
 
 
@@ -13,11 +14,13 @@ class ConnectionDataPackageRequest:
     username: str
     server_host: str
     server_port: int = 8087
+    cert_enroll_port: int = 8446
     use_tls: bool = True
     mode: str = "itak"
     zip_name: str = "tak-connection-package"
     truststore_filename: str = "truststore-YOUR-CA.p12"
     truststore_p12_base64: str | None = None
+    lets_encrypt: bool = False
     client_cert_filename: str | None = None
     client_cert_p12_base64: str | None = None
     ca_password: str = "atakatak"
@@ -43,6 +46,22 @@ def _safe_name(value: str, fallback: str) -> str:
     return text or fallback
 
 
+def _normalize_server_host(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" in text:
+        parsed = urlsplit(text)
+        if parsed.hostname:
+            return parsed.hostname
+        text = parsed.netloc or parsed.path
+    if "/" in text:
+        text = text.split("/", maxsplit=1)[0]
+    if text.count(":") == 1 and text.split(":")[1].isdigit():
+        text = text.split(":", maxsplit=1)[0]
+    return text.strip("[]")
+
+
 def _decode_b64(value: str | None, field_name: str) -> bytes | None:
     if not value:
         return None
@@ -57,8 +76,9 @@ def _secure_pref(
     username: str,
     host: str,
     port: int,
+    cert_enroll_port: int,
     use_tls: bool,
-    truststore_filename: str,
+    truststore_filename: str | None,
     ca_password: str,
     client_cert_filename: str | None,
     client_password: str,
@@ -66,6 +86,12 @@ def _secure_pref(
     protocol = "ssl" if use_tls else "tcp"
     connect_string = f"{host}:{port}:{protocol}"
     if client_cert_filename and use_tls:
+        trust_lines = ""
+        if truststore_filename:
+            trust_lines = (
+                f'    <entry key="caLocation" class="class java.lang.String">cert/{escape(truststore_filename)}</entry>\n'
+                f'    <entry key="caPassword" class="class java.lang.String">{escape(ca_password)}</entry>\n'
+            )
         return f"""<?xml version='1.0' encoding='ASCII' standalone='yes'?>
 <preferences>
   <preference version="1" name="cot_streams">
@@ -73,11 +99,12 @@ def _secure_pref(
     <entry key="description0" class="class java.lang.String">{escape(username)} @ TAK Server</entry>
     <entry key="enabled0" class="class java.lang.Boolean">true</entry>
     <entry key="connectString0" class="class java.lang.String">{escape(connect_string)}</entry>
+    <entry key="certificateEnrollmentAddress0" class="class java.lang.String">{escape(host)}</entry>
+    <entry key="certificateEnrollmentPort0" class="class java.lang.Integer">{cert_enroll_port}</entry>
+    <entry key="enrollForCertificateWithTrust0" class="class java.lang.Boolean">true</entry>
   </preference>
   <preference version="1" name="com.atakmap.app_preferences">
-    <entry key="caLocation" class="class java.lang.String">cert/{escape(truststore_filename)}</entry>
-    <entry key="caPassword" class="class java.lang.String">{escape(ca_password)}</entry>
-    <entry key="certificateLocation" class="class java.lang.String">cert/{escape(client_cert_filename)}</entry>
+{trust_lines}    <entry key="certificateLocation" class="class java.lang.String">cert/{escape(client_cert_filename)}</entry>
     <entry key="clientPassword" class="class java.lang.String">{escape(client_password)}</entry>
     <entry key="displayServerConnectionWidget" class="class java.lang.Boolean">true</entry>
   </preference>
@@ -99,13 +126,16 @@ def _secure_pref(
 </preferences>
 """
 
-    return f"""<?xml version='1.0' encoding='ASCII' standalone='yes'?>
+    if truststore_filename:
+        return f"""<?xml version='1.0' encoding='ASCII' standalone='yes'?>
 <preferences>
   <preference version="1" name="cot_streams">
     <entry key="count" class="class java.lang.Integer">1</entry>
     <entry key="description0" class="class java.lang.String">{escape(username)} @ TAK Server</entry>
     <entry key="enabled0" class="class java.lang.Boolean">true</entry>
     <entry key="connectString0" class="class java.lang.String">{escape(connect_string)}</entry>
+    <entry key="certificateEnrollmentAddress0" class="class java.lang.String">{escape(host)}</entry>
+    <entry key="certificateEnrollmentPort0" class="class java.lang.Integer">{cert_enroll_port}</entry>
     <entry key="caLocation0" class="class java.lang.String">cert/{escape(truststore_filename)}</entry>
     <entry key="caPassword0" class="class java.lang.String">{escape(ca_password)}</entry>
     <entry key="useAuth0" class="class java.lang.Boolean">true</entry>
@@ -114,6 +144,23 @@ def _secure_pref(
   </preference>
   <preference version="1" name="com.atakmap.app_preferences">
     <entry key="enrollForCertificateWithTrust0" class="class java.lang.Boolean">true</entry>
+    <entry key="displayServerConnectionWidget" class="class java.lang.Boolean">true</entry>
+  </preference>
+</preferences>
+"""
+
+    return f"""<?xml version='1.0' encoding='ASCII' standalone='yes'?>
+<preferences>
+  <preference version="1" name="cot_streams">
+    <entry key="count" class="class java.lang.Integer">1</entry>
+    <entry key="description0" class="class java.lang.String">{escape(username)} @ TAK Server</entry>
+    <entry key="enabled0" class="class java.lang.Boolean">true</entry>
+    <entry key="connectString0" class="class java.lang.String">{escape(connect_string)}</entry>
+    <entry key="certificateEnrollmentAddress0" class="class java.lang.String">{escape(host)}</entry>
+    <entry key="certificateEnrollmentPort0" class="class java.lang.Integer">{cert_enroll_port}</entry>
+    <entry key="enrollForCertificateWithTrust0" class="class java.lang.Boolean">true</entry>
+  </preference>
+  <preference version="1" name="com.atakmap.app_preferences">
     <entry key="displayServerConnectionWidget" class="class java.lang.Boolean">true</entry>
   </preference>
 </preferences>
@@ -149,7 +196,8 @@ def _manifest_xml(
 def build_connection_datapackage_zip(
     request: ConnectionDataPackageRequest,
 ) -> GeneratedConnectionDataPackage:
-    if not request.server_host.strip():
+    normalized_host = _normalize_server_host(request.server_host)
+    if not normalized_host:
         raise ValueError("server_host is required")
     if request.server_port <= 0 or request.server_port > 65535:
         raise ValueError("server_port must be between 1 and 65535")
@@ -163,8 +211,10 @@ def build_connection_datapackage_zip(
     zip_name = zip_base if zip_base.lower().endswith(".zip") else f"{zip_base}.zip"
     truststore_name = _safe_name(request.truststore_filename, "truststore-YOUR-CA.p12")
     truststore_bytes = _decode_b64(request.truststore_p12_base64, "truststore_p12_base64")
-    if request.use_tls and not truststore_bytes:
-        raise ValueError("truststore_p12_base64 is required when use_tls=true")
+    if request.use_tls and not request.lets_encrypt and not truststore_bytes:
+        raise ValueError(
+            "truststore_p12_base64 is required when use_tls=true unless lets_encrypt=true"
+        )
 
     client_cert_name = None
     client_cert_bytes = _decode_b64(request.client_cert_p12_base64, "client_cert_p12_base64")
@@ -176,10 +226,11 @@ def build_connection_datapackage_zip(
 
     pref_text = _secure_pref(
         username=username,
-        host=request.server_host.strip(),
+        host=normalized_host,
         port=request.server_port,
+        cert_enroll_port=request.cert_enroll_port,
         use_tls=request.use_tls,
-        truststore_filename=truststore_name,
+        truststore_filename=truststore_name if truststore_bytes else None,
         ca_password=request.ca_password,
         client_cert_filename=client_cert_name,
         client_password=request.client_password,

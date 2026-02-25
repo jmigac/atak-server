@@ -30,6 +30,7 @@ class Settings:
     db_path: str
     data_dir: str
     default_group_name: str
+    public_host: Optional[str]
     bootstrap_admin_username: str
     bootstrap_admin_password: str
     require_client_auth: bool
@@ -43,6 +44,12 @@ class Settings:
     tls_ca_path: Optional[str]
     tls_cert_file: Optional[str]
     tls_key_file: Optional[str]
+    tls_letsencrypt_domain: Optional[str]
+    tls_letsencrypt_dir: str
+    enroll_enabled: bool
+    enroll_port: int
+    enroll_truststore_p12_file: Optional[str]
+    enroll_letsencrypt: bool
 
 
 def load_settings() -> Settings:
@@ -55,6 +62,7 @@ def load_settings() -> Settings:
         db_path=os.getenv("TAK_DB_PATH", "/app/data/tak_server.db"),
         data_dir=os.getenv("TAK_DATA_DIR", "/app/data"),
         default_group_name=os.getenv("TAK_DEFAULT_GROUP_NAME", "default"),
+        public_host=os.getenv("TAK_PUBLIC_HOST"),
         bootstrap_admin_username=os.getenv("TAK_BOOTSTRAP_ADMIN_USERNAME", "admin"),
         bootstrap_admin_password=os.getenv("TAK_BOOTSTRAP_ADMIN_PASSWORD", "admin12345"),
         require_client_auth=_read_bool("TAK_REQUIRE_CLIENT_AUTH", True),
@@ -68,19 +76,34 @@ def load_settings() -> Settings:
         tls_ca_path=os.getenv("TAK_TLS_CA_PATH"),
         tls_cert_file=os.getenv("TAK_TLS_CERT_FILE"),
         tls_key_file=os.getenv("TAK_TLS_KEY_FILE"),
+        tls_letsencrypt_domain=os.getenv("TAK_TLS_LETSENCRYPT_DOMAIN"),
+        tls_letsencrypt_dir=os.getenv("TAK_TLS_LETSENCRYPT_DIR", "/etc/letsencrypt/live"),
+        enroll_enabled=_read_bool("TAK_ENROLL_ENABLED", True),
+        enroll_port=_read_int("TAK_ENROLL_PORT", 8446),
+        enroll_truststore_p12_file=os.getenv("TAK_ENROLL_TRUSTSTORE_P12_FILE"),
+        enroll_letsencrypt=_read_bool("TAK_ENROLL_LETSENCRYPT", False),
     )
 
 
 def build_tls_context(settings: Settings) -> Optional[ssl.SSLContext]:
     if not settings.tls_enabled:
         return None
-    if not settings.tls_cert_file or not settings.tls_key_file:
+    cert_file = settings.tls_cert_file
+    key_file = settings.tls_key_file
+    if (not cert_file or not key_file) and settings.tls_letsencrypt_domain:
+        base = settings.tls_letsencrypt_dir.rstrip("/")
+        domain = settings.tls_letsencrypt_domain.strip()
+        cert_file = f"{base}/{domain}/fullchain.pem"
+        key_file = f"{base}/{domain}/privkey.pem"
+
+    if not cert_file or not key_file:
         raise ValueError(
-            "TLS is enabled but TAK_TLS_CERT_FILE or TAK_TLS_KEY_FILE is missing"
+            "TLS is enabled but cert/key are missing. Set TAK_TLS_CERT_FILE/TAK_TLS_KEY_FILE "
+            "or TAK_TLS_LETSENCRYPT_DOMAIN."
         )
 
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    context.load_cert_chain(certfile=settings.tls_cert_file, keyfile=settings.tls_key_file)
+    context.load_cert_chain(certfile=cert_file, keyfile=key_file)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     if settings.tls_require_client_cert or settings.cert_auth_enabled:
         if not settings.tls_ca_file and not settings.tls_ca_path:

@@ -11,6 +11,7 @@ Required:
 
 Common options:
   --server-port PORT               Connection port in profile (default: 8087)
+  --enroll-port PORT               Certificate enrollment port in profile (default: 8446)
   --mode MODE                      itak or atak (default: itak)
   --profile-username USER          Username label inside package (default: operator)
   --zip-name NAME                  Package name without .zip (default: tak-connection-package)
@@ -22,6 +23,7 @@ Common options:
 Transport:
   --tcp                            Generate non-TLS profile (default)
   --tls                            Generate TLS profile, includes truststore
+  --lets-encrypt                   Generate TLS profile for public Let's Encrypt cert (no custom truststore)
 
 Truststore options (only needed with --tls):
   --truststore-p12 FILE            Existing truststore .p12 file
@@ -81,16 +83,18 @@ fetch_server_cert_pem() {
   fi
 }
 
-SERVER_HOST=""
+SERVER_HOST="server.migac.local"
 SERVER_PORT="8087"
+ENROLL_PORT="8446"
 MODE="itak"
 PROFILE_USERNAME="operator"
 ZIP_NAME="tak-connection-package"
 OUTPUT="./tak-connection-package.zip"
-API_URL="http://localhost:8088"
+API_URL="http://server.migac.local:8088"
 ADMIN_USER="admin"
 ADMIN_PASS="admin12345"
 USE_TLS="false"
+LETS_ENCRYPT="false"
 TRUSTSTORE_P12=""
 TRUSTSTORE_OUT="./generated-truststore.p12"
 TRUSTSTORE_FILENAME="truststore-YOUR-CA.p12"
@@ -105,6 +109,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --server-host) SERVER_HOST="${2:-}"; shift 2 ;;
     --server-port) SERVER_PORT="${2:-}"; shift 2 ;;
+    --enroll-port) ENROLL_PORT="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     --profile-username) PROFILE_USERNAME="${2:-}"; shift 2 ;;
     --zip-name) ZIP_NAME="${2:-}"; shift 2 ;;
@@ -114,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --admin-pass) ADMIN_PASS="${2:-}"; shift 2 ;;
     --tcp) USE_TLS="false"; shift 1 ;;
     --tls) USE_TLS="true"; shift 1 ;;
+    --lets-encrypt) USE_TLS="true"; LETS_ENCRYPT="true"; shift 1 ;;
     --truststore-p12) TRUSTSTORE_P12="${2:-}"; shift 2 ;;
     --ca-cert) CA_CERT="${2:-}"; shift 2 ;;
     --fetch-server-cert) FETCH_SERVER_CERT="true"; shift 1 ;;
@@ -132,9 +138,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+normalize_host() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  if [[ "$value" == *:* ]]; then
+    local maybe_port="${value##*:}"
+    if [[ "$maybe_port" =~ ^[0-9]+$ ]]; then
+      value="${value%%:*}"
+    fi
+  fi
+  printf '%s' "$value"
+}
+
 if [[ -z "$SERVER_HOST" ]]; then
   echo "--server-host is required" >&2
   usage
+  exit 1
+fi
+
+SERVER_HOST="$(normalize_host "$SERVER_HOST")"
+if [[ -z "$SERVER_HOST" ]]; then
+  echo "Could not parse --server-host into a valid hostname/IP" >&2
   exit 1
 fi
 
@@ -153,8 +179,10 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$USE_TLS" == "true" ]]; then
-  require_cmd openssl
-  if [[ -z "$TRUSTSTORE_P12" ]]; then
+  if [[ "$LETS_ENCRYPT" != "true" ]]; then
+    require_cmd openssl
+  fi
+  if [[ "$LETS_ENCRYPT" != "true" && -z "$TRUSTSTORE_P12" ]]; then
     if [[ -n "$CA_CERT" ]]; then
       if [[ ! -f "$CA_CERT" ]]; then
         echo "CA cert file not found: $CA_CERT" >&2
@@ -174,7 +202,7 @@ if [[ "$USE_TLS" == "true" ]]; then
       exit 1
     fi
   fi
-  if [[ ! -f "$TRUSTSTORE_P12" ]]; then
+  if [[ "$LETS_ENCRYPT" != "true" && ! -f "$TRUSTSTORE_P12" ]]; then
     echo "Truststore file not found: $TRUSTSTORE_P12" >&2
     exit 1
   fi
@@ -200,9 +228,11 @@ cat >"$PAYLOAD_FILE" <<EOF
   "username": "$(json_escape "$PROFILE_USERNAME")",
   "server_host": "$(json_escape "$SERVER_HOST")",
   "server_port": $SERVER_PORT,
+  "cert_enroll_port": $ENROLL_PORT,
   "mode": "$(json_escape "$MODE")",
   "zip_name": "$(json_escape "$ZIP_NAME")",
   "use_tls": $USE_TLS,
+  "lets_encrypt": $LETS_ENCRYPT,
   "truststore_filename": "$(json_escape "$TRUSTSTORE_FILENAME")",
   "truststore_p12_base64": "$(json_escape "$TRUSTSTORE_B64")",
   "ca_password": "$(json_escape "$CA_PASSWORD")",
@@ -214,13 +244,16 @@ cat >"$PAYLOAD_FILE" <<EOF
 EOF
 
 mkdir -p "$(dirname "$OUTPUT")"
-curl --fail-with-body -sS \
-  -u "$ADMIN_USER:$ADMIN_PASS" \
-  -H "Content-Type: application/json" \
-  -X POST \
-  --data @"$PAYLOAD_FILE" \
-  "$API_URL/packages/connection-bundle" \
-  -o "$OUTPUT"
+#curl --fail-with-body -sS \
+#  -u "$ADMIN_USER:$ADMIN_PASS" \
+#  -H "Content-Type: application/json" \
+#  -X POST \
+#  --data @"$PAYLOAD_FILE" \
+#  "$API_URL/packages/connection-bundle" \
+#  -o "$OUTPUT"
 
 echo "Generated connection package: $OUTPUT"
 echo "Transport mode: $([[ "$USE_TLS" == "true" ]] && echo "TLS" || echo "TCP (non-secure)")"
+if [[ "$LETS_ENCRYPT" == "true" ]]; then
+  echo "TLS trust mode: Let's Encrypt / public CA (no embedded truststore)"
+fi

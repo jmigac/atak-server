@@ -92,8 +92,26 @@ class EnrollmentApi:
 
     async def _read_request(self, reader: asyncio.StreamReader) -> Optional[EnrollRequest]:
         try:
-            raw_headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
-        except Exception:
+            first = await asyncio.wait_for(reader.readexactly(1), timeout=10)
+        except Exception as exc:
+            LOGGER.info("enroll header read failed stage=first-byte error=%r", exc)
+            return None
+
+        if first and first[0] == 0x16:
+            LOGGER.info(
+                "enroll received TLS handshake on plain HTTP listener port=%s; enable TAK_TLS_ENABLED or terminate TLS upstream",
+                self._settings.enroll_port,
+            )
+            return None
+
+        try:
+            raw_headers = first + await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
+        except Exception as exc:
+            LOGGER.info(
+                "enroll header read failed stage=headers first_byte=0x%02x error=%r",
+                first[0] if first else -1,
+                exc,
+            )
             return None
 
         lines = raw_headers.decode("utf-8", errors="ignore").split("\r\n")

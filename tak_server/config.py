@@ -65,7 +65,7 @@ def load_settings() -> Settings:
         public_host=os.getenv("TAK_PUBLIC_HOST"),
         bootstrap_admin_username=os.getenv("TAK_BOOTSTRAP_ADMIN_USERNAME", "admin"),
         bootstrap_admin_password=os.getenv("TAK_BOOTSTRAP_ADMIN_PASSWORD", "admin12345"),
-        require_client_auth=_read_bool("TAK_REQUIRE_CLIENT_AUTH", True),
+        require_client_auth=_read_bool("TAK_REQUIRE_CLIENT_AUTH", False),
         allow_password_auth=_read_bool("TAK_ALLOW_PASSWORD_AUTH", True),
         cert_auth_enabled=_read_bool("TAK_CERT_AUTH_ENABLED", False),
         cert_auth_auto_provision=_read_bool("TAK_CERT_AUTO_PROVISION", True),

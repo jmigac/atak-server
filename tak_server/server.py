@@ -195,10 +195,18 @@ def _broadcast_event(
 
 def _parse_auth_frame(frame: bytes) -> tuple[str, str] | None:
     text = frame.decode("utf-8", errors="ignore").strip()
-    parts = text.split(" ")
-    if len(parts) != 3 or parts[0].upper() != "AUTH":
+    if not text:
         return None
-    return parts[1], parts[2]
+    if not text.upper().startswith("AUTH"):
+        return None
+
+    remainder = text[4:].strip()
+    if not remainder:
+        return "", ""
+    if " " not in remainder:
+        return remainder, ""
+    username, password = remainder.split(" ", maxsplit=1)
+    return username.strip(), password.strip()
 
 
 def _extract_peer_certificate(
@@ -347,12 +355,21 @@ async def _handle_cot_client(
                 if not frame:
                     continue
 
+                auth_frame = _parse_auth_frame(frame)
+                if auth_frame is not None and not settings.require_client_auth:
+                    username, password = auth_frame
+                    if username and password and settings.allow_password_auth:
+                        identity = repository.authenticate_user(username, password)
+                        if identity is not None:
+                            session.identity = identity
+                    _queue_text(state, session, "AUTH OK")
+                    continue
+
                 if settings.require_client_auth and not session.authenticated:
                     authenticated = False
                     if settings.allow_password_auth:
-                        auth = _parse_auth_frame(frame)
-                        if auth is not None:
-                            username, password = auth
+                        if auth_frame is not None:
+                            username, password = auth_frame
                             identity = repository.authenticate_user(username, password)
                             if identity is not None:
                                 session.identity = identity

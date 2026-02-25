@@ -1,0 +1,26 @@
+services:
+  tak-server:
+    build:
+      context: .
+    image: tak-server:dev
+    ports:
+      - "9087:8087"
+      - "9088:8088"
+    environment:
+      TAK_BIND_HOST: "0.0.0.0"
+      TAK_COT_PORT: "8087"
+      TAK_ADMIN_PORT: "8088"
+      TAK_IDLE_TIMEOUT_SECONDS: "120"
+      TAK_QUEUE_SIZE: "500"
+      TAK_DB_PATH: "/app/data/tak_server.db"
+      TAK_DATA_DIR: "/app/data"
+      TAK_DEFAULT_GROUP_NAME: "default"
+      TAK_BOOTSTRAP_ADMIN_USERNAME: "admin"
+      TAK_BOOTSTRAP_ADMIN_PASSWORD: "admin12345"
+      TAK_REQUIRE_CLIENT_AUTH: "false"
+      TAK_TLS_ENABLED: "false"
+    volumes:
+      - tak-server-data:/app/data
+
+volumes:
+  tak-server-data:

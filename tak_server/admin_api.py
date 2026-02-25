@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -12,6 +13,9 @@ from tak_server.datapackage_builder import (
     build_connection_datapackage_zip,
 )
 from tak_server.repository import Repository, RepositoryError, UserIdentity
+
+
+LOGGER = logging.getLogger("tak_server.admin_api")
 
 
 @dataclass(frozen=True)
@@ -58,14 +62,33 @@ class AdminApi:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_str = str(peer) if peer else "unknown"
         try:
             request = await self._read_request(reader)
             if request is None:
+                LOGGER.info("admin request parse failed peer=%s", peer_str)
                 writer.close()
                 await writer.wait_closed()
                 return
+            user_agent = request.headers.get("user-agent", "")
+            LOGGER.info(
+                "admin request peer=%s method=%s path=%s body_bytes=%d ua=%s",
+                peer_str,
+                request.method,
+                request.path,
+                len(request.body),
+                user_agent,
+            )
             await self._dispatch(request, writer)
+            LOGGER.info(
+                "admin request done peer=%s method=%s path=%s",
+                peer_str,
+                request.method,
+                request.path,
+            )
         except Exception:
+            LOGGER.exception("admin request error peer=%s", peer_str)
             await self._write_json(writer, 500, {"error": "internal server error"})
         finally:
             if not writer.is_closing():
@@ -155,6 +178,7 @@ class AdminApi:
 
         user = self._authenticated_user(request)
         if user is None:
+            LOGGER.info("admin unauthorized method=%s path=%s", request.method, request.path)
             await self._write_json(
                 writer,
                 401,

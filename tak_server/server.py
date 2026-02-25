@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import signal
 import time
 import uuid
@@ -216,6 +217,17 @@ def _parse_keepalive_frame(frame: bytes) -> str | None:
     return None
 
 
+def _preview_bytes(data: bytes, limit: int = 120) -> str:
+    if not data:
+        return ""
+    head = data[:limit]
+    text = head.decode("utf-8", errors="replace")
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    if len(data) > limit:
+        text += f"...(+{len(data) - limit}B)"
+    return text
+
+
 def _extract_peer_certificate(
     writer: asyncio.StreamWriter,
 ) -> tuple[str, Optional[str], Optional[str], Optional[str]] | None:
@@ -295,6 +307,9 @@ async def _handle_cot_client(
 ) -> None:
     peer = writer.get_extra_info("peername")
     peer_str = str(peer) if peer else "unknown"
+    local = writer.get_extra_info("sockname")
+    local_str = str(local) if local else "unknown"
+    tls_active = bool(writer.get_extra_info("ssl_object"))
     session = ClientSession(
         session_id=uuid.uuid4().hex[:12],
         peer=peer_str,
@@ -305,7 +320,18 @@ async def _handle_cot_client(
     )
     state.register(session)
     writer_task = asyncio.create_task(_writer_worker(session))
-    LOGGER.info("client connected session=%s peer=%s", session.session_id, session.peer)
+    LOGGER.info(
+        "cot connect session=%s peer=%s local=%s tls=%s require_auth=%s",
+        session.session_id,
+        session.peer,
+        local_str,
+        tls_active,
+        settings.require_client_auth,
+    )
+    bytes_in = 0
+    frames_in = 0
+    sampled_chunks = 0
+    sampled_frames = 0
 
     try:
         if settings.require_client_auth:
@@ -320,8 +346,19 @@ async def _handle_cot_client(
                 else:
                     state.metrics.auth_failures += 1
                     _queue_text(state, session, "AUTH FAILED")
+                    LOGGER.info(
+                        "cot auth required but unavailable session=%s peer=%s",
+                        session.session_id,
+                        session.peer,
+                    )
                     await asyncio.sleep(0.05)
                     return
+            else:
+                LOGGER.info(
+                    "cot cert-auth success session=%s user=%s",
+                    session.session_id,
+                    session.identity.username if session.identity else "unknown",
+                )
 
         while True:
             try:
@@ -335,7 +372,18 @@ async def _handle_cot_client(
                 break
 
             if not chunk:
+                LOGGER.info("cot socket closed by peer session=%s", session.session_id)
                 break
+            bytes_in += len(chunk)
+            if sampled_chunks < 4:
+                LOGGER.info(
+                    "cot rx chunk session=%s bytes=%d total_bytes=%d preview=%s",
+                    session.session_id,
+                    len(chunk),
+                    bytes_in,
+                    _preview_bytes(chunk),
+                )
+                sampled_chunks += 1
 
             try:
                 decoded_frames = session.parser.push(chunk)
@@ -356,11 +404,29 @@ async def _handle_cot_client(
                 )
                 break
 
+            if not decoded_frames:
+                LOGGER.info(
+                    "cot rx undecoded session=%s buffered=%d",
+                    session.session_id,
+                    session.parser.buffer_size,
+                )
+
             for decoded in decoded_frames:
                 frame = decoded.payload
                 session.wire_format = decoded.wire_format
                 if not frame:
                     continue
+                frames_in += 1
+                if sampled_frames < 8:
+                    LOGGER.info(
+                        "cot rx frame session=%s frame=%d wire=%s bytes=%d preview=%s",
+                        session.session_id,
+                        frames_in,
+                        decoded.wire_format,
+                        len(frame),
+                        _preview_bytes(frame),
+                    )
+                    sampled_frames += 1
 
                 auth_frame = _parse_auth_frame(frame)
                 if auth_frame is not None and not settings.require_client_auth:
@@ -369,12 +435,30 @@ async def _handle_cot_client(
                         identity = repository.authenticate_user(username, password)
                         if identity is not None:
                             session.identity = identity
+                            LOGGER.info(
+                                "cot optional-auth accepted session=%s user=%s",
+                                session.session_id,
+                                identity.username,
+                            )
+                        else:
+                            LOGGER.info(
+                                "cot optional-auth credentials rejected session=%s user=%s",
+                                session.session_id,
+                                username,
+                            )
                     _queue_text(state, session, "AUTH OK")
+                    LOGGER.info("cot auth ack session=%s", session.session_id)
                     continue
 
                 keepalive_response = _parse_keepalive_frame(frame)
                 if keepalive_response is not None:
                     _queue_text(state, session, keepalive_response)
+                    LOGGER.info(
+                        "cot keepalive session=%s request=%s response=%s",
+                        session.session_id,
+                        _preview_bytes(frame, limit=32),
+                        keepalive_response,
+                    )
                     continue
 
                 if settings.require_client_auth and not session.authenticated:
@@ -410,7 +494,11 @@ async def _handle_cot_client(
                     if not authenticated:
                         state.metrics.auth_failures += 1
                         _queue_text(state, session, "AUTH FAILED")
-                        LOGGER.info("client authentication failed session=%s", session.session_id)
+                        LOGGER.info(
+                            "cot authentication failed session=%s frame_preview=%s",
+                            session.session_id,
+                            _preview_bytes(frame),
+                        )
                         await asyncio.sleep(0.05)
                         return
                     continue
@@ -418,13 +506,20 @@ async def _handle_cot_client(
                 xml_payload = extract_cot_xml(frame)
                 if xml_payload is None:
                     state.metrics.invalid_messages += 1
+                    LOGGER.info(
+                        "cot non-cot payload session=%s wire=%s bytes=%d preview=%s",
+                        session.session_id,
+                        session.wire_format,
+                        len(frame),
+                        _preview_bytes(frame),
+                    )
                     continue
 
                 try:
                     event = parse_cot_event(xml_payload)
                 except CoTValidationError as exc:
                     state.metrics.invalid_messages += 1
-                    LOGGER.debug(
+                    LOGGER.info(
                         "invalid CoT session=%s peer=%s error=%s",
                         session.session_id,
                         session.peer,
@@ -467,8 +562,15 @@ async def _handle_cot_client(
                     target_group_id=target_group_id,
                 )
                 state.metrics.messages_out += delivered
+                LOGGER.info(
+                    "cot event routed session=%s uid=%s type=%s delivered=%d",
+                    session.session_id,
+                    event.uid,
+                    event.cot_type,
+                    delivered,
+                )
     except (ConnectionError, asyncio.IncompleteReadError):
-        LOGGER.info("client disconnected session=%s", session.session_id)
+        LOGGER.info("cot connection error/disconnect session=%s", session.session_id)
     finally:
         writer_task.cancel()
         with contextlib.suppress(BaseException):
@@ -477,12 +579,22 @@ async def _handle_cot_client(
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
-        LOGGER.info("session closed session=%s", session.session_id)
+        LOGGER.info(
+            "cot session closed session=%s peer=%s bytes_in=%d frames_in=%d authenticated=%s user=%s",
+            session.session_id,
+            session.peer,
+            bytes_in,
+            frames_in,
+            session.authenticated,
+            session.identity.username if session.identity else "",
+        )
 
 
 def _configure_logging() -> None:
+    level_name = os.getenv("TAK_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 

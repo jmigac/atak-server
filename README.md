@@ -286,6 +286,7 @@ scripts/generate_connection_datapackage.sh \
 - `TAK_COT_PORT` (default `8087`)
 - `TAK_COT_SSL_PORT` (default `8089`)
 - `TAK_ADMIN_PORT` (default `8088`)
+- `TAK_LOG_LEVEL` (default `INFO`; set `DEBUG` for extra diagnostics)
 - `TAK_IDLE_TIMEOUT_SECONDS` (default `120`)
 - `TAK_QUEUE_SIZE` (default `500`)
 - `TAK_DB_PATH` (default `/app/data/tak_server.db`)

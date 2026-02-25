@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,9 @@ from tak_server.datapackage_builder import (
 )
 from tak_server.qr_utils import render_qr_png
 from tak_server.repository import Repository, UserIdentity
+
+
+LOGGER = logging.getLogger("tak_server.enrollment_api")
 
 
 @dataclass(frozen=True)
@@ -53,14 +57,33 @@ class EnrollmentApi:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_str = str(peer) if peer else "unknown"
         try:
             request = await self._read_request(reader)
             if request is None:
+                LOGGER.info("enroll request parse failed peer=%s", peer_str)
                 writer.close()
                 await writer.wait_closed()
                 return
+            user_agent = request.headers.get("user-agent", "")
+            LOGGER.info(
+                "enroll request peer=%s method=%s path=%s body_bytes=%d ua=%s",
+                peer_str,
+                request.method,
+                request.path,
+                len(request.body),
+                user_agent,
+            )
             await self._dispatch(request, writer)
+            LOGGER.info(
+                "enroll request done peer=%s method=%s path=%s",
+                peer_str,
+                request.method,
+                request.path,
+            )
         except Exception:
+            LOGGER.exception("enroll request error peer=%s", peer_str)
             await self._write_json(writer, 400, {"error": "bad request"})
         finally:
             if not writer.is_closing():
@@ -275,6 +298,7 @@ class EnrollmentApi:
         if request.path in {"/oauth/token", "/Marti/oauth/token"} and request.method in {"POST", "GET"}:
             user = self._auth_user(request)
             if user is None:
+                LOGGER.info("enroll oauth unauthorized path=%s", request.path)
                 await self._write_json(writer, 401, {"error": "invalid credentials"})
                 return
             token = base64.b64encode(f"{user.username}:{user.user_id}".encode("utf-8")).decode("ascii")
@@ -292,6 +316,7 @@ class EnrollmentApi:
         if request.path in {"/api/truststore", "/Marti/api/truststore"} and request.method == "GET":
             truststore = self._truststore_bytes()
             if not truststore:
+                LOGGER.info("enroll truststore missing path=%s", request.path)
                 await self._write_json(writer, 404, {"error": "truststore not configured"})
                 return
             await self._write_bytes(
@@ -310,6 +335,7 @@ class EnrollmentApi:
         } and request.method in {"GET", "POST"}:
             user = self._auth_user(request)
             if user is None:
+                LOGGER.info("enroll profile unauthorized path=%s", request.path)
                 await self._write_json(writer, 401, {"error": "authentication required"})
                 return
 
@@ -341,8 +367,16 @@ class EnrollmentApi:
                     "Content-Disposition": f'attachment; filename="{user.username}-connection.zip"'
                 },
             )
+            LOGGER.info(
+                "enroll profile package generated user=%s mode=%s tls=%s lets_encrypt=%s",
+                user.username,
+                mode,
+                use_tls,
+                lets_encrypt,
+            )
             return
 
+        LOGGER.info("enroll path not found method=%s path=%s", request.method, request.path)
         await self._write_json(writer, 404, {"error": "not found"})
 
     async def _write_json(self, writer: asyncio.StreamWriter, status: int, payload: dict) -> None:

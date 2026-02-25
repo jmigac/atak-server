@@ -13,6 +13,7 @@ services:
       TAK_COT_PORT: "8087"
       TAK_COT_SSL_PORT: "8089"
       TAK_ADMIN_PORT: "8088"
+      TAK_LOG_LEVEL: "INFO"
       TAK_IDLE_TIMEOUT_SECONDS: "120"
       TAK_QUEUE_SIZE: "500"
       TAK_DB_PATH: "/app/data/tak_server.db"

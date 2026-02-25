@@ -2,7 +2,9 @@
 
 This project provides a TAK-style server MVP with:
 - CoT XML TCP ingest + fan-out routing.
+- TAK-style binary framing compatibility (varint length-prefixed payloads with embedded CoT extraction).
 - User authentication for CoT clients (`AUTH <username> <password>`).
+- Certificate authentication (mTLS) with optional auto-provisioned users from client cert identity.
 - Group-aware and policy-aware publish/subscribe enforcement.
 - Mission workflows (create, member/group assignment, package linkage).
 - Data package workflows (upload metadata/content, list, download, attach to missions).
@@ -32,6 +34,40 @@ AUTH admin admin12345
 ```
 
 Then send CoT XML frames delimited by newline (`\n`) or null (`\0`).
+
+For TAK protocol compatibility, the server also accepts varint length-prefixed frames and will extract embedded `<event>...</event>` CoT XML when present.
+
+## iTAK certificate-auth mode
+
+1. Enable TLS and client certificate validation:
+
+```yaml
+TAK_TLS_ENABLED: "true"
+TAK_TLS_REQUIRE_CLIENT_CERT: "true"
+TAK_TLS_CA_FILE: "/app/certs/ca.crt"
+TAK_TLS_CERT_FILE: "/app/certs/server.crt"
+TAK_TLS_KEY_FILE: "/app/certs/server.key"
+TAK_REQUIRE_CLIENT_AUTH: "true"
+TAK_CERT_AUTH_ENABLED: "true"
+TAK_CERT_AUTO_PROVISION: "true"
+TAK_ALLOW_PASSWORD_AUTH: "false"
+```
+
+2. Mount cert files into `/app/certs`.
+3. Install the client certificate (issued by your CA) in iTAK.
+4. In iTAK server connection, use:
+- Protocol: `TCP` (SSL/TLS enabled in the profile)
+- Host: your server DNS/IP
+- Port: `8087`
+- Certificate auth enabled in iTAK profile
+
+## Non-secure TCP mode
+
+Yes, you can run without TLS and use plain TCP.
+
+- Set server-side `TAK_TLS_ENABLED=false`.
+- In bundle/API payload use `use_tls=false` (or script flag `--tcp`).
+- iTAK profile should use TCP with SSL/TLS disabled.
 
 ## Admin API authentication
 
@@ -80,6 +116,7 @@ Missions:
 Data packages:
 - `GET /packages`
 - `POST /packages`
+- `POST /packages/connection-bundle` (generate TAK/iTAK connection ZIP)
 - `GET /packages/{id}`
 - `GET /packages/{id}/download`
 
@@ -141,6 +178,62 @@ curl -u admin:admin12345 \
   http://localhost:8088/packages
 ```
 
+Generate iTAK connection bundle ZIP for direct download (TLS):
+
+```bash
+CA_B64=$(base64 < certs/truststore-YOUR-CA.p12 | tr -d '\n')
+curl -u admin:admin12345 \
+  -H "Content-Type: application/json" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"mode\":\"itak\",\"zip_name\":\"tak-itak-connection\",\"truststore_p12_base64\":\"$CA_B64\"}" \
+  http://localhost:8088/packages/connection-bundle \
+  -o tak-itak-connection.zip
+```
+
+Generate and store bundle as managed server package:
+
+```bash
+CA_B64=$(base64 < certs/truststore-YOUR-CA.p12 | tr -d '\n')
+curl -u admin:admin12345 \
+  -H "Content-Type: application/json" \
+  -d "{\"server_host\":\"tak.example.com\",\"server_port\":8087,\"mode\":\"itak\",\"name\":\"itak-server-connection\",\"store\":true,\"truststore_p12_base64\":\"$CA_B64\"}" \
+  http://localhost:8088/packages/connection-bundle
+```
+
+Local Bash generator (calls API endpoint and writes ZIP):
+
+```bash
+scripts/generate_connection_datapackage.sh \
+  --server-host tak.example.com \
+  --server-port 8087 \
+  --mode itak \
+  --tls \
+  --ca-cert certs/ca.crt \
+  --output ./tak-itak-connection.zip
+```
+
+Create truststore automatically from remote TLS server cert:
+
+```bash
+scripts/generate_connection_datapackage.sh \
+  --server-host tak.example.com \
+  --server-port 8087 \
+  --mode itak \
+  --tls \
+  --fetch-server-cert \
+  --output ./tak-itak-connection.zip
+```
+
+Non-secure TCP bundle (no truststore needed):
+
+```bash
+scripts/generate_connection_datapackage.sh \
+  --server-host tak.example.com \
+  --server-port 8087 \
+  --mode itak \
+  --tcp \
+  --output ./tak-itak-connection-tcp.zip
+```
+
 ## Environment variables
 
 - `TAK_BIND_HOST` (default `0.0.0.0`)
@@ -154,8 +247,14 @@ curl -u admin:admin12345 \
 - `TAK_BOOTSTRAP_ADMIN_USERNAME` (default `admin`)
 - `TAK_BOOTSTRAP_ADMIN_PASSWORD` (default `admin12345`)
 - `TAK_REQUIRE_CLIENT_AUTH` (default `true`)
+- `TAK_ALLOW_PASSWORD_AUTH` (default `true`)
+- `TAK_CERT_AUTH_ENABLED` (default `false`)
+- `TAK_CERT_AUTO_PROVISION` (default `true`)
 - `TAK_AUTH_TOKEN` (optional legacy fallback for `AUTH_TOKEN <token>`)
 - `TAK_TLS_ENABLED` (default `false`)
+- `TAK_TLS_REQUIRE_CLIENT_CERT` (default `false`)
+- `TAK_TLS_CA_FILE` (required for certificate validation)
+- `TAK_TLS_CA_PATH` (optional trust store path)
 - `TAK_TLS_CERT_FILE` (required when TLS enabled)
 - `TAK_TLS_KEY_FILE` (required when TLS enabled)
 

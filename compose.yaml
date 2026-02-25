@@ -18,9 +18,17 @@ services:
       TAK_BOOTSTRAP_ADMIN_USERNAME: "admin"
       TAK_BOOTSTRAP_ADMIN_PASSWORD: "admin12345"
       TAK_REQUIRE_CLIENT_AUTH: "false"
+      TAK_ALLOW_PASSWORD_AUTH: "true"
+      TAK_CERT_AUTH_ENABLED: "true"
+      TAK_CERT_AUTO_PROVISION: "true"
       TAK_TLS_ENABLED: "false"
+      TAK_TLS_REQUIRE_CLIENT_CERT: "false"
+      TAK_TLS_CA_FILE: "/app/certs/ca.crt"
+      TAK_TLS_CERT_FILE: "/app/certs/server.crt"
+      TAK_TLS_KEY_FILE: "/app/certs/server.key"
     volumes:
       - tak-server-data:/app/data
+      - ./certs:/app/certs:ro
 
 volumes:
   tak-server-data:

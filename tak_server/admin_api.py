@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
+from tak_server.datapackage_builder import (
+    ConnectionDataPackageRequest,
+    build_connection_datapackage_zip,
+)
 from tak_server.repository import Repository, RepositoryError, UserIdentity
 
 
@@ -254,6 +258,23 @@ class AdminApi:
         except (TypeError, ValueError) as exc:
             raise RepositoryError(f"{key} must be an integer") from exc
 
+    def _as_bool(self, value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _require_package_write(self, user: UserIdentity) -> None:
+        if user.is_admin:
+            return
+        if not self._repository.can_perform_action(user, "package_write"):
+            raise RepositoryError("package_write policy required")
+
     async def _handle_users(
         self,
         request: HttpRequest,
@@ -462,6 +483,68 @@ class AdminApi:
         user: UserIdentity,
         segments: list[str],
     ) -> None:
+        if len(segments) == 2 and segments[1] == "connection-bundle" and request.method == "POST":
+            self._require_package_write(user)
+            payload = self._json_body(request)
+
+            try:
+                generated = build_connection_datapackage_zip(
+                    ConnectionDataPackageRequest(
+                        username=str(payload.get("username") or user.username),
+                        server_host=str(payload.get("server_host", "")),
+                        server_port=int(payload.get("server_port", 8087)),
+                        use_tls=self._as_bool(payload.get("use_tls"), default=True),
+                        mode=str(payload.get("mode", "itak")),
+                        zip_name=str(
+                            payload.get("zip_name")
+                            or payload.get("name")
+                            or f"{payload.get('server_host', 'tak')}-connection"
+                        ),
+                        truststore_filename=str(
+                            payload.get("truststore_filename", "truststore-YOUR-CA.p12")
+                        ),
+                        truststore_p12_base64=payload.get("truststore_p12_base64"),
+                        client_cert_filename=payload.get("client_cert_filename"),
+                        client_cert_p12_base64=payload.get("client_cert_p12_base64"),
+                        ca_password=str(payload.get("ca_password", "atakatak")),
+                        client_password=str(payload.get("client_password", "atakatak")),
+                    )
+                )
+            except ValueError as exc:
+                raise RepositoryError(str(exc)) from exc
+
+            store = self._as_bool(payload.get("store"), default=False)
+            if not store:
+                await self._write_bytes(
+                    writer,
+                    200,
+                    generated.content,
+                    content_type="application/zip",
+                    extra_headers={
+                        "Content-Disposition": f'attachment; filename="{generated.file_name}"'
+                    },
+                )
+                return
+
+            created = self._repository.create_data_package(
+                identity=user,
+                name=str(payload.get("name") or generated.file_name.replace(".zip", "")),
+                file_name=generated.file_name,
+                content_type="application/zip",
+                content_base64=base64.b64encode(generated.content).decode("ascii"),
+                description=payload.get("description")
+                or "Generated TAK server connection data package",
+                group_ids=[int(value) for value in payload.get("group_ids", [])],
+                mission_ids=[int(value) for value in payload.get("mission_ids", [])],
+            )
+            created.pop("storage_path", None)
+            created["generated_bundle"] = {
+                "mode": generated.mode,
+                "include_client_cert": generated.include_client_cert,
+            }
+            await self._write_json(writer, 201, created)
+            return
+
         if len(segments) == 1 and request.method == "GET":
             await self._write_json(writer, 200, {"packages": self._repository.list_data_packages(user)})
             return

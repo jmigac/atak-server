@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import signal
 import time
@@ -12,6 +13,12 @@ from typing import Dict, Optional
 from tak_server.admin_api import AdminApi
 from tak_server.config import Settings, build_tls_context, load_settings
 from tak_server.cot import CoTValidationError, CoTEvent, parse_cot_event
+from tak_server.protocol import (
+    FrameParser,
+    WIRE_DELIMITED,
+    encode_for_wire,
+    extract_cot_xml,
+)
 from tak_server.repository import Repository, UserIdentity
 
 
@@ -28,6 +35,7 @@ class Metrics:
     messages_out: int = 0
     invalid_messages: int = 0
     auth_failures: int = 0
+    cert_auth_success: int = 0
     queue_drops: int = 0
     idle_timeouts: int = 0
     policy_blocks: int = 0
@@ -42,6 +50,9 @@ class ClientSession:
     writer: asyncio.StreamWriter
     authenticated: bool
     identity: Optional[UserIdentity] = None
+    wire_format: str = WIRE_DELIMITED
+    parser: FrameParser = field(default_factory=FrameParser)
+    cert_subject_cn: Optional[str] = None
 
 
 class ServerState:
@@ -66,6 +77,7 @@ class ServerState:
             "messages_out": self.metrics.messages_out,
             "invalid_messages": self.metrics.invalid_messages,
             "auth_failures": self.metrics.auth_failures,
+            "cert_auth_success": self.metrics.cert_auth_success,
             "queue_drops": self.metrics.queue_drops,
             "idle_timeouts": self.metrics.idle_timeouts,
             "policy_blocks": self.metrics.policy_blocks,
@@ -86,26 +98,12 @@ class ServerState:
                     "authenticated": session.authenticated,
                     "username": session.identity.username if session.identity else None,
                     "groups": groups,
+                    "wire_format": session.wire_format,
+                    "cert_subject_cn": session.cert_subject_cn,
                     "queued_messages": session.queue.qsize(),
                 }
             )
         return clients
-
-
-def _next_frame(buffer: bytes) -> tuple[bytes, bytes] | tuple[None, bytes]:
-    separators = []
-    for separator in (b"\n", b"\x00"):
-        index = buffer.find(separator)
-        if index >= 0:
-            separators.append(index)
-
-    if not separators:
-        return None, buffer
-
-    split_at = min(separators)
-    frame = buffer[:split_at].strip()
-    remainder = buffer[split_at + 1 :]
-    return frame, remainder
 
 
 async def _writer_worker(session: ClientSession) -> None:
@@ -135,6 +133,11 @@ def _queue_for_session(state: ServerState, session: ClientSession, payload: byte
         except asyncio.QueueFull:
             state.metrics.queue_drops += 1
             return False
+
+
+def _queue_text(state: ServerState, session: ClientSession, text: str) -> bool:
+    payload = encode_for_wire(text.encode("utf-8"), session.wire_format)
+    return _queue_for_session(state, session, payload)
 
 
 def _can_deliver_to_recipient(
@@ -178,12 +181,12 @@ def _broadcast_event(
     target_group_id: Optional[int],
 ) -> int:
     delivered = 0
-    wire_payload = event.raw + b"\n"
     for recipient in list(state.sessions.values()):
         if recipient.session_id == sender.session_id:
             continue
         if not _can_deliver_to_recipient(repository, sender, recipient, event, target_group_id):
             continue
+        wire_payload = encode_for_wire(event.raw, recipient.wire_format)
         if _queue_for_session(state, recipient, wire_payload):
             delivered += 1
     return delivered
@@ -195,6 +198,76 @@ def _parse_auth_frame(frame: bytes) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0].upper() != "AUTH":
         return None
     return parts[1], parts[2]
+
+
+def _extract_peer_certificate(
+    writer: asyncio.StreamWriter,
+) -> tuple[str, Optional[str], Optional[str], Optional[str]] | None:
+    ssl_object = writer.get_extra_info("ssl_object")
+    if ssl_object is None:
+        return None
+
+    cert_binary = ssl_object.getpeercert(binary_form=True)
+    cert_dict = ssl_object.getpeercert() or {}
+    if not cert_binary:
+        return None
+
+    fingerprint = hashlib.sha256(cert_binary).hexdigest()
+    serial_number = cert_dict.get("serialNumber")
+    subject = cert_dict.get("subject", ())
+    subject_cn: Optional[str] = None
+    subject_parts: list[str] = []
+    for rdn in subject:
+        for item in rdn:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            key, value = item
+            if not isinstance(value, str):
+                continue
+            subject_parts.append(f"{key}={value}")
+            if key in {"commonName", "CN"} and not subject_cn:
+                subject_cn = value
+
+    subject_dn = ",".join(subject_parts) if subject_parts else None
+    return fingerprint, subject_cn, subject_dn, serial_number
+
+
+def _try_certificate_auth(
+    settings: Settings,
+    state: ServerState,
+    session: ClientSession,
+    repository: Repository,
+) -> bool:
+    if not settings.cert_auth_enabled:
+        return False
+    cert = _extract_peer_certificate(session.writer)
+    if cert is None:
+        return False
+
+    fingerprint, subject_cn, subject_dn, serial_number = cert
+    identity = repository.authenticate_certificate(
+        fingerprint_sha256=fingerprint,
+        subject_cn=subject_cn,
+        subject_dn=subject_dn,
+        serial_number=serial_number,
+        auto_provision=settings.cert_auth_auto_provision,
+        default_group_name=settings.default_group_name,
+    )
+    if identity is None:
+        return False
+
+    session.identity = identity
+    session.authenticated = True
+    session.cert_subject_cn = subject_cn
+    state.metrics.cert_auth_success += 1
+    _queue_text(state, session, "AUTH CERT OK")
+    LOGGER.info(
+        "certificate authenticated session=%s username=%s subject_cn=%s",
+        session.session_id,
+        identity.username,
+        subject_cn,
+    )
+    return True
 
 
 async def _handle_cot_client(
@@ -216,16 +289,23 @@ async def _handle_cot_client(
     )
     state.register(session)
     writer_task = asyncio.create_task(_writer_worker(session))
-    buffer = b""
     LOGGER.info("client connected session=%s peer=%s", session.session_id, session.peer)
 
     try:
         if settings.require_client_auth:
-            _queue_for_session(
-                state,
-                session,
-                b"# Authentication required. Send: AUTH <username> <password>\n",
-            )
+            cert_ok = _try_certificate_auth(settings, state, session, repository)
+            if not cert_ok:
+                if settings.allow_password_auth or settings.auth_token:
+                    _queue_text(
+                        state,
+                        session,
+                        "# Authentication required. Send: AUTH <username> <password>",
+                    )
+                else:
+                    state.metrics.auth_failures += 1
+                    _queue_text(state, session, "AUTH FAILED")
+                    await asyncio.sleep(0.05)
+                    return
 
         while True:
             try:
@@ -241,39 +321,49 @@ async def _handle_cot_client(
             if not chunk:
                 break
 
-            buffer += chunk
-            if len(buffer) > MAX_BUFFER_BYTES:
+            try:
+                decoded_frames = session.parser.push(chunk)
+            except ValueError as exc:
                 LOGGER.warning(
-                    "client buffer limit exceeded session=%s size=%d",
+                    "frame parse failure session=%s peer=%s error=%s",
                     session.session_id,
-                    len(buffer),
+                    session.peer,
+                    str(exc),
                 )
                 break
 
-            while True:
-                frame, buffer = _next_frame(buffer)
-                if frame is None:
-                    break
+            if session.parser.buffer_size > MAX_BUFFER_BYTES:
+                LOGGER.warning(
+                    "client buffer limit exceeded session=%s size=%d",
+                    session.session_id,
+                    session.parser.buffer_size,
+                )
+                break
+
+            for decoded in decoded_frames:
+                frame = decoded.payload
+                session.wire_format = decoded.wire_format
                 if not frame:
                     continue
 
                 if settings.require_client_auth and not session.authenticated:
-                    auth = _parse_auth_frame(frame)
-                    if auth is not None:
-                        username, password = auth
-                        identity = repository.authenticate_user(username, password)
-                        if identity is not None:
-                            session.identity = identity
-                            session.authenticated = True
-                            _queue_for_session(state, session, b"AUTH OK\n")
-                            LOGGER.info(
-                                "client authenticated session=%s username=%s",
-                                session.session_id,
-                                identity.username,
-                            )
-                            continue
-
-                    if settings.auth_token:
+                    authenticated = False
+                    if settings.allow_password_auth:
+                        auth = _parse_auth_frame(frame)
+                        if auth is not None:
+                            username, password = auth
+                            identity = repository.authenticate_user(username, password)
+                            if identity is not None:
+                                session.identity = identity
+                                session.authenticated = True
+                                _queue_text(state, session, "AUTH OK")
+                                LOGGER.info(
+                                    "password authenticated session=%s username=%s",
+                                    session.session_id,
+                                    identity.username,
+                                )
+                                authenticated = True
+                    if not authenticated and settings.auth_token:
                         supplied = frame.decode("utf-8", errors="ignore").strip()
                         if supplied.startswith("AUTH_TOKEN "):
                             token = supplied.split(" ", maxsplit=1)[1]
@@ -283,18 +373,25 @@ async def _handle_cot_client(
                                     settings.bootstrap_admin_password,
                                 )
                                 session.identity = identity
-                                session.authenticated = True
-                                _queue_for_session(state, session, b"AUTH OK\n")
-                                continue
+                                session.authenticated = identity is not None
+                                if identity is not None:
+                                    _queue_text(state, session, "AUTH OK")
+                                    authenticated = True
+                    if not authenticated:
+                        state.metrics.auth_failures += 1
+                        _queue_text(state, session, "AUTH FAILED")
+                        LOGGER.info("client authentication failed session=%s", session.session_id)
+                        await asyncio.sleep(0.05)
+                        return
+                    continue
 
-                    state.metrics.auth_failures += 1
-                    _queue_for_session(state, session, b"AUTH FAILED\n")
-                    LOGGER.info("client authentication failed session=%s", session.session_id)
-                    await asyncio.sleep(0.05)
-                    return
+                xml_payload = extract_cot_xml(frame)
+                if xml_payload is None:
+                    state.metrics.invalid_messages += 1
+                    continue
 
                 try:
-                    event = parse_cot_event(frame)
+                    event = parse_cot_event(xml_payload)
                 except CoTValidationError as exc:
                     state.metrics.invalid_messages += 1
                     LOGGER.debug(

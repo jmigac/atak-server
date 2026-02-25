@@ -57,6 +57,19 @@ def _safe_file_name(file_name: str) -> str:
     return cleaned.strip("._") or "package.bin"
 
 
+def _sanitize_username(value: str) -> str:
+    allowed = []
+    for ch in value.strip().lower():
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            allowed.append(ch)
+        else:
+            allowed.append("-")
+    text = "".join(allowed).strip("-_.")
+    if not text:
+        return "cert-user"
+    return text[:60]
+
+
 @dataclass(frozen=True)
 class PolicyRule:
     action: str
@@ -126,6 +139,18 @@ class Repository:
                     PRIMARY KEY (user_id, group_id),
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                     FOREIGN KEY (group_id) REFERENCES tak_groups(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS user_certificates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    fingerprint_sha256 TEXT NOT NULL UNIQUE,
+                    subject_cn TEXT,
+                    subject_dn TEXT,
+                    serial_number TEXT,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS policies (
@@ -305,6 +330,44 @@ class Repository:
             for row in rows
         )
 
+    def _identity_for_user_id_locked(self, user_id: int) -> Optional[UserIdentity]:
+        user = self._conn.execute(
+            """
+            SELECT id, username, is_admin, enabled
+            FROM users
+            WHERE id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        if user is None or int(user["enabled"]) != 1:
+            return None
+
+        group_map = self._group_ids_for_user_locked(int(user["id"]))
+        policy_rules = self._policy_rules_for_groups_locked(set(group_map.keys()))
+        return UserIdentity(
+            user_id=int(user["id"]),
+            username=str(user["username"]),
+            is_admin=bool(user["is_admin"]),
+            enabled=bool(user["enabled"]),
+            groups=group_map,
+            policies=policy_rules,
+        )
+
+    def _next_available_username_locked(self, base_username: str) -> str:
+        candidate = _sanitize_username(base_username)
+        index = 1
+        while True:
+            row = self._conn.execute(
+                "SELECT 1 FROM users WHERE username=?",
+                (candidate,),
+            ).fetchone()
+            if row is None:
+                return candidate
+            index += 1
+            suffix = f"-{index}"
+            max_base = max(1, 60 - len(suffix))
+            candidate = f"{_sanitize_username(base_username)[:max_base]}{suffix}"
+
     def authenticate_user(self, username: str, password: str) -> Optional[UserIdentity]:
         with self._lock:
             user = self._conn.execute(
@@ -321,17 +384,79 @@ class Repository:
                 return None
             if not _verify_password(password, str(user["password_hash"])):
                 return None
+            return self._identity_for_user_id_locked(int(user["id"]))
 
-            group_map = self._group_ids_for_user_locked(int(user["id"]))
-            policy_rules = self._policy_rules_for_groups_locked(set(group_map.keys()))
-            return UserIdentity(
-                user_id=int(user["id"]),
-                username=str(user["username"]),
-                is_admin=bool(user["is_admin"]),
-                enabled=bool(user["enabled"]),
-                groups=group_map,
-                policies=policy_rules,
+    def authenticate_certificate(
+        self,
+        *,
+        fingerprint_sha256: str,
+        subject_cn: str | None,
+        subject_dn: str | None,
+        serial_number: str | None,
+        auto_provision: bool,
+        default_group_name: str = "default",
+    ) -> Optional[UserIdentity]:
+        with self._lock:
+            cert_row = self._conn.execute(
+                """
+                SELECT uc.user_id, u.enabled
+                FROM user_certificates uc
+                JOIN users u ON u.id = uc.user_id
+                WHERE uc.fingerprint_sha256=?
+                """,
+                (fingerprint_sha256,),
+            ).fetchone()
+            if cert_row is not None:
+                if int(cert_row["enabled"]) != 1:
+                    return None
+                self._conn.execute(
+                    "UPDATE user_certificates SET last_seen_at=? WHERE fingerprint_sha256=?",
+                    (_utc_timestamp(), fingerprint_sha256),
+                )
+                self._conn.commit()
+                return self._identity_for_user_id_locked(int(cert_row["user_id"]))
+
+            if not auto_provision:
+                return None
+
+            base = subject_cn or f"cert-{fingerprint_sha256[:12]}"
+            username = self._next_available_username_locked(base)
+            password_hash = _hash_password(secrets.token_urlsafe(24))
+            now = _utc_timestamp()
+            cursor = self._conn.execute(
+                """
+                INSERT INTO users(username, password_hash, is_admin, enabled, created_at)
+                VALUES (?, ?, 0, 1, ?)
+                """,
+                (username, password_hash, now),
             )
+            user_id = int(cursor.lastrowid)
+            group = self.ensure_group(default_group_name, "Default TAK operators group")
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO user_group_memberships(user_id, group_id, role)
+                VALUES (?, ?, 'member')
+                """,
+                (user_id, int(group["id"])),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO user_certificates(
+                    user_id, fingerprint_sha256, subject_cn, subject_dn, serial_number, created_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    fingerprint_sha256,
+                    subject_cn,
+                    subject_dn,
+                    serial_number,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return self._identity_for_user_id_locked(user_id)
 
     def can_perform_action(
         self,
